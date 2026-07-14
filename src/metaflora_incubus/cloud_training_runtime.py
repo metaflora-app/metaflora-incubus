@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,7 +148,6 @@ _THIRD_PARTY_ENVIRONMENT_KEYS = (
     "CUDA_PATH",
     "CUDA_VISIBLE_DEVICES",
     "CXX",
-    "HOME",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -169,6 +169,28 @@ def _run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=cwd, check=True, env=_third_party_environment())
 
 
+@contextmanager
+def _hidden_huggingface_credentials(home: Path):
+    """Remove cached Hub credentials while untrusted native code is executing."""
+    from metaflora_incubus.cloud_bootstrap import _private_atomic_write
+
+    paths = (
+        home / ".cache" / "huggingface" / "token",
+        home / ".cache" / "huggingface" / "stored_tokens",
+    )
+    try:
+        contents = {path: path.read_text(encoding="utf-8") for path in paths}
+    except OSError as exc:
+        raise CloudConstraintError("cached Hugging Face credentials are missing") from exc
+    for path in paths:
+        path.unlink()
+    try:
+        yield
+    finally:
+        for path, value in contents.items():
+            _private_atomic_write(path, value)
+
+
 def _checkout_pinned_revision(repository: Path, revision: str) -> None:
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise CloudConstraintError("llama.cpp revision must be a pinned 40-hex commit")
@@ -185,10 +207,21 @@ def _checkout_pinned_revision(repository: Path, revision: str) -> None:
         raise CloudConstraintError("llama.cpp checkout did not resolve to the pinned commit")
 
 
-def _checkpoint_store(plan: CloudExecutionPlan, token: str):
+def _require_cached_huggingface_auth() -> None:
+    from huggingface_hub import HfApi
+
+    try:
+        identity = HfApi(token=None).whoami()
+    except Exception as exc:
+        raise CloudConstraintError("cached Hugging Face authentication failed") from exc
+    if not isinstance(identity, dict) or not identity.get("name"):
+        raise CloudConstraintError("cached Hugging Face identity is invalid")
+
+
+def _checkpoint_store(plan: CloudExecutionPlan):
     if plan.checkpoint_target.backend is CheckpointBackend.GOOGLE_DRIVE:
         return GoogleDriveCheckpointStore(plan.checkpoint_target, plan.run_id)
-    return HuggingFacePrivateCheckpointStore(plan.checkpoint_target, plan.run_id, token=token)
+    return HuggingFacePrivateCheckpointStore(plan.checkpoint_target, plan.run_id)
 
 
 def _prepare_ephemeral_workspace(
@@ -367,7 +400,7 @@ def _build_gguf(
     base = artifacts / "base-f16.gguf"
     lora = artifacts / "adapter.gguf"
     merged = artifacts / "merged-f16.gguf"
-    final = artifacts / "metaflora-incubus-v1-q4.gguf"
+    final = artifacts / "metaflora-incubus-v1.gguf"
     _run(
         [
             "python",
@@ -406,18 +439,53 @@ def _build_gguf(
             str(llama_cpp / "build/bin/llama-quantize"),
             str(merged),
             str(final),
-            "Q4_K_M",
+            plan.final_gguf_quantization,
         ]
     )
     if (
         not final.is_file()
         or not THREE_GIB <= final.stat().st_size <= plan.config.profile.final_gguf_max_bytes
     ):
-        raise CloudConstraintError("Q4 GGUF exceeds the strict 5 GiB cloud limit")
+        raise CloudConstraintError(
+            f"{plan.final_gguf_quantization} GGUF must remain inside the 3-5 GiB cloud range"
+        )
     base.unlink(missing_ok=True)
     lora.unlink(missing_ok=True)
     merged.unlink(missing_ok=True)
     return final
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[str, object]:
+    """Run the committed release cases before the cloud workspace can be removed."""
+    from metaflora_incubus.gguf_benchmark_runner import (
+        BenchmarkRunnerConfig,
+        run_gguf_benchmark,
+    )
+
+    server = plan.workspace / "llama.cpp" / "build" / "bin" / "llama-server"
+    cases = Path(__file__).resolve().parents[2] / "benchmarks" / "gguf-v1-cases.jsonl"
+    output = artifact.parent / "benchmark-final"
+    config = BenchmarkRunnerConfig.create(
+        server_binary=server,
+        server_sha256=_sha256_file(server),
+        model_path=artifact,
+        model_sha256=_sha256_file(artifact),
+        cases_path=cases,
+        output_dir=output,
+        seed=4242,
+        port=18081,
+        health_timeout_seconds=120.0,
+        request_timeout_seconds=120.0,
+    )
+    return run_gguf_benchmark(config)
 
 
 def execute_training_and_build(
@@ -442,7 +510,6 @@ def execute_training_and_build(
 
     if not torch.cuda.is_available():
         raise CloudConstraintError("CUDA GPU is required")
-    token = _required(environment, "HF_TOKEN")
     source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
     dataset_repo = _required(environment, "INCUBUS_DATASET_REPO")
     source_revision = _required_revision(environment, "INCUBUS_SOURCE_REVISION")
@@ -460,7 +527,8 @@ def execute_training_and_build(
         "source_repo_sha256": hashlib.sha256(source_repo.encode()).hexdigest(),
         "source_revision": source_revision,
     }
-    store = _checkpoint_store(plan, token)
+    _require_cached_huggingface_auth()
+    store = _checkpoint_store(plan)
     restored = _prepare_ephemeral_workspace(
         plan=plan,
         store=store,
@@ -475,7 +543,7 @@ def execute_training_and_build(
     snapshot_download(
         repo_id=source_repo,
         revision=source_revision,
-        token=token,
+        token=None,
         local_dir=source,
         allow_patterns=(
             "*.safetensors",
@@ -490,7 +558,7 @@ def execute_training_and_build(
         repo_id=dataset_repo,
         repo_type="dataset",
         revision=dataset_revision,
-        token=token,
+        token=None,
         local_dir=data,
         allow_patterns=("manifest.json", "*.jsonl"),
     )
@@ -630,17 +698,32 @@ def execute_training_and_build(
     sync_checkpoints()
     del model, sft, preference
     torch.cuda.empty_cache()
-    final = _build_gguf(
-        plan=plan, source=source, adapter=adapter, artifacts=checkpoint_root / "artifacts"
-    )
-    sync_checkpoints()
-    artifact_digest = hashlib.sha256()
-    with final.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            artifact_digest.update(block)
-    result = {
-        "artifact_sha256": artifact_digest.hexdigest(),
+    with _hidden_huggingface_credentials(Path.home()):
+        final = _build_gguf(
+            plan=plan, source=source, adapter=adapter, artifacts=checkpoint_root / "artifacts"
+        )
+        benchmark = _benchmark_final_gguf(plan=plan, artifact=final)
+    artifact_sha256 = _sha256_file(final)
+    metadata = {
+        "artifact_sha256": artifact_sha256,
         "artifact_size_bytes": final.stat().st_size,
+        "benchmark": benchmark,
+        "gguf_quantization": plan.final_gguf_quantization,
+        "schema_version": 1,
+    }
+    metadata_path = final.parent / "artifact-metadata.json"
+    temporary_metadata = metadata_path.with_suffix(".json.tmp")
+    temporary_metadata.write_text(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary_metadata.replace(metadata_path)
+    sync_checkpoints()
+    result = {
+        "artifact_sha256": artifact_sha256,
+        "artifact_size_bytes": final.stat().st_size,
+        "benchmark": benchmark,
+        "gguf_quantization": plan.final_gguf_quantization,
         "checkpoint_remote": True,
         "product_id": plan.config.product_id,
         "public_upload": "blocked_until_eval_gates",

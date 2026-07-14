@@ -713,7 +713,7 @@ def build_training_run(
             steps=(
                 "merge_adapter_safetensors",
                 "export_gguf",
-                "quantize_q4",
+                "quantize_q5",
                 "run_parity_and_release_gates",
             ),
         ),

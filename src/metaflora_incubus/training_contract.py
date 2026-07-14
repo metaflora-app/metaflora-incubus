@@ -503,7 +503,7 @@ class QuantizationMatrix:
         )
         return cls.create(
             formats=formats,
-            deployable_format=QuantizationFormat.Q4,
+            deployable_format=QuantizationFormat.Q5,
             parity_jobs=tuple(
                 ParityJob(QuantizationFormat.BF16, candidate, metrics) for candidate in formats[1:]
             ),
@@ -517,12 +517,14 @@ class QuantizationMatrix:
         deployable_format: QuantizationFormat,
         parity_jobs: tuple[ParityJob, ...],
     ) -> QuantizationMatrix:
-        if QuantizationFormat.Q4 not in formats or not any(
-            item.candidate_format is QuantizationFormat.Q4
+        if deployable_format is not QuantizationFormat.Q5:
+            raise ValueError("Q5 must be the deployable format")
+        if QuantizationFormat.Q5 not in formats or not any(
+            item.candidate_format is QuantizationFormat.Q5
             and item.baseline_format is QuantizationFormat.BF16
             for item in parity_jobs
         ):
-            raise ValueError("Q4 parity against BF16 is required")
+            raise ValueError("Q5 parity against BF16 is required")
         return cls(tuple(formats), deployable_format, tuple(parity_jobs))
 
 
@@ -537,10 +539,10 @@ class BuildArtifact:
     @classmethod
     def create(cls, **values: object) -> BuildArtifact:
         if (
-            values.get("format") is QuantizationFormat.Q4
+            values.get("format") is QuantizationFormat.Q5
             and not 3 * GIB <= int(values["size_bytes"]) <= 5 * GIB
         ):
-            raise ArtifactSizeError("Q4 artifact must be between 3 and 5 GiB")
+            raise ArtifactSizeError("Q5 artifact must be between 3 and 5 GiB")
         if not isinstance(values.get("sha256"), str) or not _SHA256.fullmatch(
             str(values["sha256"])
         ):
@@ -596,7 +598,7 @@ def estimate_resources(request: ResourceEstimateInput) -> ResourceEstimate:
     training_vram = parameter_bytes + optimizer_bytes + activation_bytes
     build_disk = max(6 * GIB, parameter_bytes * 2)
     training_disk = build_disk + request.checkpoint_count * (parameter_bytes + optimizer_bytes)
-    runtime_disk = 5 * GIB if request.target_format is QuantizationFormat.Q4 else parameter_bytes
+    runtime_disk = 5 * GIB if request.target_format is QuantizationFormat.Q5 else parameter_bytes
     return ResourceEstimate(
         training=ResourceProfile(training_vram, training_vram * 2, training_disk),
         build=ResourceProfile(parameter_bytes, parameter_bytes * 2, build_disk),

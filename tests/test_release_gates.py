@@ -132,7 +132,7 @@ def candidate() -> BenchmarkReport:
 @pytest.fixture
 def quantized_candidate() -> BenchmarkReport:
     return report(
-        "incubus-v1-q4",
+        "incubus-v1-q5",
         {
             "coding": 0.83,
             "agentic_search": 0.79,

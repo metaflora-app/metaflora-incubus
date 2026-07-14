@@ -54,7 +54,7 @@ func artifactJSON(id, osName, arch, url, digest string, size, minimumRAM uint64)
 
 func modelArtifactJSON(digest string, size, minimumRAM uint64) string {
 	return `{
-  "id": "incubus-v1-q4",
+  "id": "incubus-v1-q5",
   "os": "any",
   "arch": "any",
   "url": "https://huggingface.co/metaflora/incubus/resolve/0123456789abcdef0123456789abcdef01234567/incubus-v1.gguf",
@@ -80,7 +80,7 @@ func uintString(value uint64) string {
 func TestParseAndVerifyManifestAcceptsValidSignature(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	manifestJSON := releaseManifestJSON(artifactJSON(
-		"macos-arm64-q4",
+		"macos-arm64-q5",
 		"darwin",
 		"arm64",
 		"https://downloads.metaflora.ai/incubus/v1/macos-arm64.tar.zst",
@@ -108,7 +108,7 @@ func TestParseAndVerifyManifestAcceptsValidSignature(t *testing.T) {
 func TestParseAndVerifyManifestRejectsTampering(t *testing.T) {
 	digest := strings.Repeat("b", 64)
 	payload, signature, publicKey := signedManifest(t, releaseManifestJSON(artifactJSON(
-		"linux-amd64-q4",
+		"linux-amd64-q5",
 		"linux",
 		"amd64",
 		"https://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
@@ -126,7 +126,7 @@ func TestParseAndVerifyManifestRejectsTampering(t *testing.T) {
 func TestParseAndVerifyManifestRejectsNonHTTPSArtifactURL(t *testing.T) {
 	digest := strings.Repeat("c", 64)
 	payload, signature, publicKey := signedManifest(t, releaseManifestJSON(artifactJSON(
-		"linux-amd64-q4",
+		"linux-amd64-q5",
 		"linux",
 		"amd64",
 		"http://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
@@ -143,7 +143,7 @@ func TestParseAndVerifyManifestRejectsNonHTTPSArtifactURL(t *testing.T) {
 func TestParseAndVerifyManifestRejectsDifferentProductID(t *testing.T) {
 	digest := strings.Repeat("d", 64)
 	document := strings.Replace(releaseManifestJSON(artifactJSON(
-		"linux-amd64-q4", "linux", "amd64",
+		"linux-amd64-q5", "linux", "amd64",
 		"https://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
 		digest, 5*giB, 12*giB,
 	)), "metaflora-incubus-v1", "different-product", 1)
@@ -174,14 +174,14 @@ func TestVerifySHA256RejectsCorruptArtifact(t *testing.T) {
 func TestSelectArtifactMatchesPlatformAndResources(t *testing.T) {
 	manifest := Manifest{Artifacts: []Artifact{
 		{
-			ID:              "macos-amd64-q4",
+			ID:              "macos-amd64-q5",
 			OS:              "darwin",
 			Arch:            "amd64",
 			SizeBytes:       5 * giB,
 			MinimumRAMBytes: 12 * giB,
 		},
 		{
-			ID:              "macos-arm64-q4",
+			ID:              "macos-arm64-q5",
 			OS:              "darwin",
 			Arch:            "arm64",
 			SizeBytes:       5 * giB,
@@ -196,14 +196,14 @@ func TestSelectArtifactMatchesPlatformAndResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectArtifact() error = %v", err)
 	}
-	if artifact.ID != "macos-arm64-q4" {
-		t.Fatalf("Artifact.ID = %q, want macos-arm64-q4", artifact.ID)
+	if artifact.ID != "macos-arm64-q5" {
+		t.Fatalf("Artifact.ID = %q, want macos-arm64-q5", artifact.ID)
 	}
 }
 
 func TestSelectArtifactRefusesInsufficientResources(t *testing.T) {
 	manifest := Manifest{Artifacts: []Artifact{{
-		ID:              "macos-arm64-q4",
+		ID:              "macos-arm64-q5",
 		OS:              "darwin",
 		Arch:            "arm64",
 		SizeBytes:       5 * giB,

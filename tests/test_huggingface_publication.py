@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-MODEL_NAME = "metaflora-incubus-v1-q4.gguf"
+MODEL_NAME = "metaflora-incubus-v1.gguf"
 DEFAULT_REPO_ID = "metaflora/incubus"
 REQUIRED_FILES = (
     MODEL_NAME,
@@ -90,6 +90,7 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             "artifacts": [
                 {
                     "path": MODEL_NAME,
+                    "gguf_quantization": "Q5_K_M",
                     "sha256": artifact_sha,
                     "size_bytes": len(model_bytes),
                 }
@@ -111,7 +112,7 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
                     "overrefusal_rate": 0.03,
                 },
                 "deployable_candidate": {
-                    "artifact_id": "candidate-q4",
+                    "artifact_id": "candidate-q5",
                     "scores": release_scores(0.93),
                     "overrefusal_rate": 0.04,
                 },

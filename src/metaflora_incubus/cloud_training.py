@@ -43,6 +43,7 @@ class FreeGpuProfile:
     lora_rank: int
     load_in_4bit: bool
     quantization_type: str
+    final_gguf_quantization: str
     final_gguf_max_bytes: int
 
     @classmethod
@@ -54,6 +55,7 @@ class FreeGpuProfile:
             lora_rank=16,
             load_in_4bit=True,
             quantization_type="nf4",
+            final_gguf_quantization="Q5_K_M",
             final_gguf_max_bytes=FIVE_GIB,
         )
 
@@ -120,6 +122,7 @@ class CloudExecutionPlan:
     local_retention: bool
     resume_enabled: bool
     training_mode: str
+    final_gguf_quantization: str
     post_training_steps: tuple[str, ...]
 
     @classmethod
@@ -144,13 +147,14 @@ class CloudExecutionPlan:
             local_retention=False,
             resume_enabled=True,
             training_mode="qlora_nf4",
+            final_gguf_quantization=config.profile.final_gguf_quantization,
             post_training_steps=(
                 "convert_base_to_f16_gguf",
                 "convert_adapter_to_gguf",
                 "merge_gguf_in_cloud",
-                "quantize_q4_k_m",
-                "run_eval_gates",
-                "publish_verified_bundle",
+                "quantize_q5_k_m",
+                "run_candidate_benchmark",
+                "sync_private_evidence",
                 "delete_ephemeral_workspace",
             ),
         )
@@ -229,6 +233,7 @@ def load_cloud_config(path: Path | str) -> CloudConfig:
             lora_rank=int(profile.get("lora_rank", 0)),
             load_in_4bit=profile.get("load_in_4bit") is True,
             quantization_type=str(profile.get("quantization_type", "")),
+            final_gguf_quantization=str(profile.get("final_gguf_quantization", "")),
             final_gguf_max_bytes=int(profile.get("final_gguf_max_bytes", 0)),
         ),
         llama_cpp_revision=str(document.get("llama_cpp_revision", "")),
@@ -333,15 +338,14 @@ class GoogleDriveCheckpointStore:
 class HuggingFacePrivateCheckpointStore:
     """Resume checkpoints through a separate private Hub repository branch."""
 
-    def __init__(self, target: RemoteCheckpointTarget, run_id: str, *, token: str) -> None:
-        if target.backend is not CheckpointBackend.HF_PRIVATE_BRANCH or not token:
-            raise CloudConstraintError("private Hub checkpoint credentials are required")
+    def __init__(self, target: RemoteCheckpointTarget, run_id: str) -> None:
+        if target.backend is not CheckpointBackend.HF_PRIVATE_BRANCH:
+            raise CloudConstraintError("private Hub checkpoint configuration is required")
         from huggingface_hub import HfApi
 
-        self._api = HfApi(token=token)
+        self._api = HfApi(token=None)
         self._target = target
         self._run_id = run_id
-        self._token = token
 
     def ensure_private(self) -> None:
         self._api.create_repo(
@@ -372,7 +376,7 @@ class HuggingFacePrivateCheckpointStore:
                 revision=self._target.branch,
                 allow_patterns=f"runs/{self._run_id}/**",
                 local_dir=staging,
-                token=self._token,
+                token=None,
             )
         except Exception as exc:
             if staging.exists():

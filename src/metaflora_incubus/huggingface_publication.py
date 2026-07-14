@@ -16,7 +16,7 @@ from metaflora_incubus.release_gates import (
     evaluate_release,
 )
 
-MODEL_NAME = "metaflora-incubus-v1-q4.gguf"
+MODEL_NAME = "metaflora-incubus-v1.gguf"
 REQUIRED_FILES = (
     MODEL_NAME,
     "README.md",
@@ -415,6 +415,7 @@ def _check_manifest(
         and len(artifacts) == 1
         and isinstance(artifacts[0], dict)
         and artifacts[0].get("path") == MODEL_NAME
+        and artifacts[0].get("gguf_quantization") == "Q5_K_M"
         and artifacts[0].get("sha256") == artifact_sha
         and artifacts[0].get("size_bytes") == model_size
     )
@@ -484,7 +485,13 @@ def _check_benchmark_evidence(
         for item in raw:
             _required_text(item["response"])
             row_scores = _mapping(item["scores"])
-            for metric in PINNED_REQUIRED_METRICS:
+            dimension = item.get("dimension")
+            metrics = (
+                (dimension,)
+                if isinstance(dimension, str) and dimension in PINNED_REQUIRED_METRICS
+                else PINNED_REQUIRED_METRICS
+            )
+            for metric in metrics:
                 score = _number(row_scores[metric])
                 if not 0 <= score <= 1:
                     raise ValueError("score out of range")
@@ -494,6 +501,8 @@ def _check_benchmark_evidence(
                 raise ValueError("invalid refusal label")
             refusals.append(refused)
         for metric, values in measured.items():
+            if not values:
+                raise ValueError(f"missing metric rows: {metric}")
             observed = sum(values) / len(values)
             if abs(observed - _number(expected_scores[metric])) > 1e-12:
                 raise ValueError(f"aggregate mismatch: {metric}")

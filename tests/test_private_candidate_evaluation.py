@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -82,8 +82,9 @@ def policy() -> CandidateSelectionPolicy:
             maximum_asr_wer=0.12,
             minimum_asr_lead_over_each_baseline=0.01,
         ),
-        minimum_size_reduction_bytes=1,
-        minimum_overrefusal_improvement=0.0,
+        minimum_candidate_size_bytes=1,
+        maximum_candidate_size_bytes=1024,
+        minimum_overrefusal_improvement=0.01,
         allowed_license_ids=("Apache-2.0", "MIT"),
     )
 
@@ -187,7 +188,7 @@ def test_candidate_verification_checks_gguf_sha_size_and_private_license(
         )
 
 
-def test_candidate_is_selected_only_when_same_gates_and_size_beat_incumbent(
+def test_candidate_is_selected_only_when_same_gates_pass_within_size_budget(
     tmp_path: Path,
 ) -> None:
     artifact = tmp_path / "candidate.gguf"
@@ -249,7 +250,7 @@ def test_candidate_verification_uses_one_open_and_fstat_per_file(
     assert opened == [artifact, license_path]
 
 
-def test_candidate_selection_fails_closed_on_equal_size_quality_or_report_binding(
+def test_candidate_selection_fails_closed_on_size_budget_quality_or_report_binding(
     tmp_path: Path,
 ) -> None:
     artifact = tmp_path / "candidate.gguf"
@@ -266,16 +267,19 @@ def test_candidate_selection_fails_closed_on_equal_size_quality_or_report_bindin
     incumbent = report(SHA_A, 0.80, 0.12)
     baselines = {"reference": report(SHA_B, 0.70, 0.25)}
 
-    equal_size = select_private_candidate(
+    out_of_budget = select_private_candidate(
         candidate=verified,
         candidate_reports=bound_reports(verified, 0.83, 0.10),
         incumbent=IncumbentArtifactPin(SHA_A, verified.size_bytes),
         incumbent_report=incumbent,
         baselines=baselines,
-        policy=active_policy,
+        policy=replace(
+            active_policy,
+            maximum_candidate_size_bytes=verified.size_bytes - 1,
+        ),
     )
-    assert equal_size.selected is False
-    assert "size_not_better" in {failure.code for failure in equal_size.failures}
+    assert out_of_budget.selected is False
+    assert "candidate_size_out_of_bounds" in {failure.code for failure in out_of_budget.failures}
 
     weaker = select_private_candidate(
         candidate=verified,

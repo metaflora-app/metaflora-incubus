@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+import types
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
 
+from metaflora_incubus.cloud_bootstrap import install_cloud_bootstrap
 from metaflora_incubus.cloud_training import (
     FIVE_GIB,
     CheckpointBackend,
@@ -14,6 +17,7 @@ from metaflora_incubus.cloud_training import (
     CloudExecutionPlan,
     FreeGpuProfile,
     GoogleDriveCheckpointStore,
+    HuggingFacePrivateCheckpointStore,
     RemoteCheckpointTarget,
     authorize_publication,
     cloud_disk_budget,
@@ -22,14 +26,18 @@ from metaflora_incubus.cloud_training import (
     validate_cloud_disk_preflight,
 )
 from metaflora_incubus.cloud_training_runtime import (
+    _benchmark_final_gguf,
     _checkout_pinned_revision,
+    _hidden_huggingface_credentials,
     _latest_checkpoint,
     _prepare_ephemeral_workspace,
+    _require_cached_huggingface_auth,
     _required,
     _required_revision,
     _run,
     _select_lora_targets,
     _select_model_loader_kind,
+    _third_party_environment,
     _verify_checkpoint_manifest,
     _write_checkpoint_manifest,
 )
@@ -130,11 +138,53 @@ def test_plan_keeps_intermediate_weights_off_the_users_mac() -> None:
         "convert_base_to_f16_gguf",
         "convert_adapter_to_gguf",
         "merge_gguf_in_cloud",
-        "quantize_q4_k_m",
-        "run_eval_gates",
-        "publish_verified_bundle",
+        "quantize_q5_k_m",
+        "run_candidate_benchmark",
+        "sync_private_evidence",
         "delete_ephemeral_workspace",
     )
+
+
+def test_final_cloud_artifact_runs_pinned_local_benchmark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    plan = CloudExecutionPlan.create(
+        config=config,
+        checkpoint_target=target,
+        run_id="benchmark-final",
+        parameter_count=7_000_000_000,
+        vram_bytes=16 * 1024**3,
+    )
+    server = plan.workspace / "llama.cpp" / "build" / "bin" / "llama-server"
+    server.parent.mkdir(parents=True)
+    server.write_bytes(b"server")
+    artifact = tmp_path / "final.gguf"
+    artifact.write_bytes(b"GGUFmodel")
+    captured: dict[str, object] = {}
+
+    def fake_run(runner_config):
+        captured["config"] = runner_config
+        return {"artifact_sha256": runner_config.model_sha256, "case_count": 48}
+
+    monkeypatch.setattr(
+        "metaflora_incubus.gguf_benchmark_runner.run_gguf_benchmark",
+        fake_run,
+    )
+
+    evidence = _benchmark_final_gguf(plan=plan, artifact=artifact)
+
+    runner_config = captured["config"]
+    assert runner_config.server_binary == server
+    assert runner_config.model_path == artifact
+    assert runner_config.cases_path.name == "gguf-v1-cases.jsonl"
+    assert runner_config.seed == 4242
+    assert evidence["case_count"] == 48
 
 
 def test_cloud_disk_preflight_calculates_full_peak_and_fails_fast() -> None:
@@ -260,7 +310,7 @@ def test_disk_preflight_runs_after_safe_cleanup_but_before_remote_restore(
 def test_publication_authorization_requires_passing_gates_and_at_most_five_gib(
     tmp_path: Path, size_bytes: int
 ) -> None:
-    artifact = tmp_path / "metaflora-incubus-v1-q4.gguf"
+    artifact = tmp_path / "metaflora-incubus-v1.gguf"
     artifact.touch()
     with artifact.open("r+b") as handle:
         handle.truncate(size_bytes)
@@ -277,7 +327,7 @@ def test_publication_authorization_requires_passing_gates_and_at_most_five_gib(
 
 
 def test_publication_is_fail_closed_before_any_direct_upload(tmp_path: Path) -> None:
-    artifact = tmp_path / "metaflora-incubus-v1-q4.gguf"
+    artifact = tmp_path / "metaflora-incubus-v1.gguf"
     artifact.touch()
     with artifact.open("r+b") as handle:
         handle.truncate(FIVE_GIB + 1)
@@ -299,7 +349,7 @@ def test_publication_is_fail_closed_before_any_direct_upload(tmp_path: Path) -> 
 
 
 def test_direct_hub_upload_is_not_called_when_eval_gates_fail(tmp_path: Path) -> None:
-    artifact = tmp_path / "metaflora-incubus-v1-q4.gguf"
+    artifact = tmp_path / "metaflora-incubus-v1.gguf"
     artifact.write_bytes(b"candidate")
     failed = PublicationDecision(False, (PublicationBlocker("target_miss", "coding"),))
 
@@ -339,7 +389,7 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
 
     assert notebook["metadata"]["accelerator"] == "GPU"
     assert "google.colab" in source
-    assert "userdata.get" in source
+    assert 'userdata.get("INCUBUS_BOOTSTRAP")' in source
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
@@ -348,9 +398,115 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert revisions == ["f485eb1d000063792f2b7101bd5c508ae770b321"]
     assert 'git", "clone' not in source
     assert 'rev-parse", "HEAD' in source
-    assert "INCUBUS_CHECKPOINT_HMAC_KEY" in source
+    assert "HF_TOKEN" not in source
+    assert 'os.environ["INCUBUS_PARAMETER_COUNT"]' in source
     assert "/Users/" not in source
     assert "build_input_repo_id=" not in source.casefold()
+
+
+def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path: Path) -> None:
+    values = {
+        "INCUBUS_CHECKPOINT_HMAC_KEY": "checkpoint-authentication-key-32bytes",
+        "INCUBUS_SOURCE_REPO": "private/source",
+        "INCUBUS_SOURCE_REVISION": "a" * 40,
+        "INCUBUS_DATASET_REPO": "private/dataset",
+        "INCUBUS_DATASET_REVISION": "b" * 40,
+        "INCUBUS_DATASET_SHA256": "c" * 64,
+        "INCUBUS_PARAMETER_COUNT": "7000000000",
+    }
+    payload = json.dumps(
+        {
+            "hf_token": "cached-access-token",
+            "hf_stored_tokens": "[account]\nhf_token = cached-access-token\n",
+            "environment": values,
+        }
+    ).encode()
+    environment = {"HF_TOKEN": "must-be-removed"}
+
+    parameter_count = install_cloud_bootstrap(payload, home=tmp_path, environment=environment)
+
+    assert parameter_count == 7_000_000_000
+    assert environment == values
+    cache = tmp_path / ".cache" / "huggingface"
+    assert (cache / "token").read_text() == "cached-access-token"
+    assert "cached-access-token" in (cache / "stored_tokens").read_text()
+    assert (cache / "token").stat().st_mode & 0o777 == 0o600
+    assert (cache / "stored_tokens").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("parameter_count", ("0", "7500000001", "not-an-int"))
+def test_bootstrap_rejects_invalid_parameter_count(tmp_path: Path, parameter_count: str) -> None:
+    values = {
+        "INCUBUS_CHECKPOINT_HMAC_KEY": "checkpoint-authentication-key-32bytes",
+        "INCUBUS_SOURCE_REPO": "private/source",
+        "INCUBUS_SOURCE_REVISION": "a" * 40,
+        "INCUBUS_DATASET_REPO": "private/dataset",
+        "INCUBUS_DATASET_REVISION": "b" * 40,
+        "INCUBUS_DATASET_SHA256": "c" * 64,
+        "INCUBUS_PARAMETER_COUNT": parameter_count,
+    }
+    payload = json.dumps(
+        {"hf_token": "token", "hf_stored_tokens": "stored", "environment": values}
+    ).encode()
+    with pytest.raises(CloudConstraintError, match="parameter count"):
+        install_cloud_bootstrap(payload, home=tmp_path, environment={})
+
+
+def test_cloud_huggingface_clients_use_cached_auth_and_early_whoami(
+    monkeypatch,
+) -> None:
+    constructor_tokens: list[object] = []
+    whoami_calls = 0
+
+    class FakeHfApi:
+        def __init__(self, *, token=None):
+            constructor_tokens.append(token)
+
+        def whoami(self):
+            nonlocal whoami_calls
+            whoami_calls += 1
+            return {"name": "cached-user"}
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(HfApi=FakeHfApi))
+
+    _require_cached_huggingface_auth()
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    HuggingFacePrivateCheckpointStore(target, "run-cached-auth")
+
+    assert whoami_calls == 1
+    assert constructor_tokens == [None, None]
+
+
+def test_native_process_environment_and_benchmark_hide_cached_hub_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / ".cache" / "huggingface"
+    cache.mkdir(parents=True)
+    token = cache / "token"
+    stored = cache / "stored_tokens"
+    token.write_text("access-token", encoding="utf-8")
+    stored.write_text("refresh-token", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "must-not-pass")
+    monkeypatch.setenv("HF_HOME", str(cache))
+
+    environment = _third_party_environment()
+    assert "HOME" not in environment
+    assert "HF_TOKEN" not in environment
+    assert "HF_HOME" not in environment
+
+    with _hidden_huggingface_credentials(tmp_path):
+        assert not token.exists()
+        assert not stored.exists()
+
+    assert token.read_text(encoding="utf-8") == "access-token"
+    assert stored.read_text(encoding="utf-8") == "refresh-token"
+    assert token.stat().st_mode & 0o777 == 0o600
+    assert stored.stat().st_mode & 0o777 == 0o600
 
 
 def test_drive_checkpoint_copy_and_runtime_resume_selection(tmp_path: Path) -> None:
@@ -480,7 +636,7 @@ def test_third_party_commands_receive_no_cloud_secrets(monkeypatch, tmp_path: Pa
     for call in calls:
         environment = call["env"]
         assert environment["PATH"] == "/usr/bin"
-        assert environment["HOME"] == str(tmp_path)
+        assert "HOME" not in environment
         assert "HF_TOKEN" not in environment
         assert "INCUBUS_CHECKPOINT_HMAC_KEY" not in environment
         assert "UNRELATED_PASSWORD" not in environment

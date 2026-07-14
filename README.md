@@ -12,7 +12,7 @@ passes the complete release suite.
 
 ## Release requirements
 
-The final Q4 artifact must:
+The final Q5 artifact must:
 
 - beat the frozen internal reference and the declared local competitors on
   one reproducible benchmark harness;
@@ -61,7 +61,7 @@ the release gate still have to pass.
 
 After the training stages finish, the maintainer export command merges the
 adapter into local safetensors, converts the merged checkpoint to GGUF and
-creates the Q4 release candidate. It deliberately leaves `release_ready=false`
+creates the Q5 release candidate. It deliberately leaves `release_ready=false`
 until parity tests and the pinned release gates pass:
 
 ```sh

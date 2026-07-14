@@ -91,17 +91,25 @@ def main() -> int:
     os.environ["INCUBUS_CODE_REVISION"] = detect_code_revision()
 
     required = (
-        "HF_TOKEN",
         "INCUBUS_CHECKPOINT_HMAC_KEY",
         "INCUBUS_SOURCE_REPO",
         "INCUBUS_SOURCE_REVISION",
         "INCUBUS_DATASET_REPO",
         "INCUBUS_DATASET_REVISION",
         "INCUBUS_DATASET_SHA256",
+        "INCUBUS_PARAMETER_COUNT",
     )
     missing = tuple(name for name in required if not os.environ.get(name))
     if missing:
         raise CloudConstraintError(f"missing cloud secret names: {', '.join(missing)}")
+    try:
+        bootstrap_parameter_count = int(os.environ["INCUBUS_PARAMETER_COUNT"])
+    except ValueError as exc:
+        raise CloudConstraintError("bootstrap parameter count must be an integer") from exc
+    if not 0 < bootstrap_parameter_count <= 7_500_000_000:
+        raise CloudConstraintError("bootstrap parameter count is outside the compact profile")
+    if bootstrap_parameter_count != arguments.parameter_count:
+        raise CloudConstraintError("command parameter count does not match the bootstrap")
     from metaflora_incubus.cloud_training_runtime import execute_training_and_build
 
     result = execute_training_and_build(plan=plan, environment=os.environ)

@@ -23,7 +23,7 @@ from metaflora_incubus.release_gates import (
 
 _GGUF_MAGIC = b"GGUF"
 _HASH_CHUNK_BYTES = 1024 * 1024
-_INCUMBENT_BASELINE_ID = "incumbent_q4"
+_INCUMBENT_BASELINE_ID = "incumbent_deployable"
 _VERIFICATION_KEY = secrets.token_bytes(32)
 
 
@@ -128,26 +128,45 @@ class CandidateSelectionPolicy:
     """Additional constraints for replacing the incumbent artifact."""
 
     release_policy: ReleaseGatePolicy
-    minimum_size_reduction_bytes: int
+    minimum_candidate_size_bytes: int
+    maximum_candidate_size_bytes: int
     minimum_overrefusal_improvement: float
     allowed_license_ids: tuple[str, ...]
 
+    @classmethod
+    def release(
+        cls,
+        *,
+        release_policy: ReleaseGatePolicy,
+        minimum_overrefusal_improvement: float,
+        allowed_license_ids: tuple[str, ...],
+    ) -> CandidateSelectionPolicy:
+        """Build the fixed v1 product policy without caller-controlled size bounds."""
+        return cls(
+            release_policy=release_policy,
+            minimum_candidate_size_bytes=3 * 1024**3,
+            maximum_candidate_size_bytes=5 * 1024**3,
+            minimum_overrefusal_improvement=minimum_overrefusal_improvement,
+            allowed_license_ids=allowed_license_ids,
+        )
+
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.minimum_size_reduction_bytes, int)
-            or isinstance(self.minimum_size_reduction_bytes, bool)
-            or self.minimum_size_reduction_bytes < 1
+            not isinstance(self.minimum_candidate_size_bytes, int)
+            or isinstance(self.minimum_candidate_size_bytes, bool)
+            or not isinstance(self.maximum_candidate_size_bytes, int)
+            or isinstance(self.maximum_candidate_size_bytes, bool)
+            or self.minimum_candidate_size_bytes < 1
+            or self.maximum_candidate_size_bytes < self.minimum_candidate_size_bytes
         ):
-            raise CandidateConstraintError(
-                "minimum_size_reduction_bytes must be a positive integer"
-            )
+            raise CandidateConstraintError("candidate size bounds are invalid")
         if (
             not isinstance(self.minimum_overrefusal_improvement, (int, float))
             or isinstance(self.minimum_overrefusal_improvement, bool)
             or not isfinite(self.minimum_overrefusal_improvement)
-            or not 0 <= self.minimum_overrefusal_improvement <= 1
+            or not 0 < self.minimum_overrefusal_improvement <= 1
         ):
-            raise CandidateConstraintError("minimum_overrefusal_improvement must be within [0, 1]")
+            raise CandidateConstraintError("minimum_overrefusal_improvement must be within (0, 1]")
         allowed = tuple(self.allowed_license_ids)
         if not allowed or any(not isinstance(item, str) or not item.strip() for item in allowed):
             raise CandidateConstraintError("allowed_license_ids must not be empty")
@@ -247,13 +266,21 @@ def select_private_candidate(
         failures.append(GateFailure("report_artifact_mismatch", "candidate"))
     if incumbent_report.artifact_id != incumbent.artifact_sha256:
         failures.append(GateFailure("incumbent_report_mismatch", "incumbent"))
-    reduction = incumbent.size_bytes - candidate.size_bytes
-    if reduction < policy.minimum_size_reduction_bytes:
-        failures.append(GateFailure("size_not_better", f"reduction={reduction}"))
+    if not (
+        policy.minimum_candidate_size_bytes
+        <= candidate.size_bytes
+        <= policy.maximum_candidate_size_bytes
+    ):
+        failures.append(
+            GateFailure(
+                "candidate_size_out_of_bounds",
+                "candidate",
+            )
+        )
 
     improvement = incumbent_report.overrefusal_rate - deployable_report.overrefusal_rate
     if not isfinite(improvement) or improvement < policy.minimum_overrefusal_improvement:
-        failures.append(GateFailure("overrefusal_not_better", f"improvement={improvement:.6f}"))
+        failures.append(GateFailure("overrefusal_not_better", "candidate"))
 
     if _INCUMBENT_BASELINE_ID in baselines:
         failures.append(GateFailure("invalid_baselines", _INCUMBENT_BASELINE_ID))

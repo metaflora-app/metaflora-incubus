@@ -221,7 +221,7 @@ def test_training_dry_run_needs_no_ml_dependencies_or_gpu_and_is_safe(tmp_path: 
     assert run.post_training.steps == (
         "merge_adapter_safetensors",
         "export_gguf",
-        "quantize_q4",
+        "quantize_q5",
         "run_parity_and_release_gates",
     )
     assert all(

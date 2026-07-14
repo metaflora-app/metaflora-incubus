@@ -110,7 +110,7 @@ func newFakeReleaseVersion(t *testing.T, version string, faults releaseFaults) f
 			"revision":            "0123456789abcdef0123456789abcdef01234567",
 			"unpacked_size_bytes": 4096,
 		}, {
-			"id":                "test-model-q4",
+			"id":                "test-model-q5",
 			"os":                "any",
 			"arch":              "any",
 			"url":               server.URL + "/release/incubus-v1.gguf",

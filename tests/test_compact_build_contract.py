@@ -39,7 +39,7 @@ def provenance() -> BenchmarkProvenance:
     )
 
 
-def test_quantization_matrix_requires_bf16_q8_q6_q5_q4_and_q4_is_deployable() -> None:
+def test_quantization_matrix_requires_bf16_q8_q6_q5_q4_and_q5_is_deployable() -> None:
     matrix = QuantizationMatrix.default()
 
     assert matrix.formats == (
@@ -49,7 +49,7 @@ def test_quantization_matrix_requires_bf16_q8_q6_q5_q4_and_q4_is_deployable() ->
         QuantizationFormat.Q5,
         QuantizationFormat.Q4,
     )
-    assert matrix.deployable_format is QuantizationFormat.Q4
+    assert matrix.deployable_format is QuantizationFormat.Q5
     assert matrix.parity_jobs == tuple(
         ParityJob(
             baseline_format=QuantizationFormat.BF16,
@@ -72,27 +72,37 @@ def test_quantization_matrix_requires_bf16_q8_q6_q5_q4_and_q4_is_deployable() ->
     )
 
 
-def test_quantization_contract_is_immutable_and_cannot_skip_q4_parity() -> None:
+def test_quantization_contract_is_immutable_and_cannot_skip_q5_parity() -> None:
     matrix = QuantizationMatrix.default()
 
     with pytest.raises(FrozenInstanceError):
-        matrix.deployable_format = QuantizationFormat.Q5  # type: ignore[misc]
-    with pytest.raises(ValueError, match="Q4"):
+        matrix.deployable_format = QuantizationFormat.Q4  # type: ignore[misc]
+    with pytest.raises(ValueError, match="Q5"):
+        QuantizationMatrix.create(
+            formats=matrix.formats,
+            deployable_format=QuantizationFormat.Q5,
+            parity_jobs=tuple(
+                job
+                for job in matrix.parity_jobs
+                if job.candidate_format is not QuantizationFormat.Q5
+            ),
+        )
+    with pytest.raises(ValueError, match="deployable"):
         QuantizationMatrix.create(
             formats=matrix.formats,
             deployable_format=QuantizationFormat.Q4,
-            parity_jobs=matrix.parity_jobs[:-1],
+            parity_jobs=matrix.parity_jobs,
         )
 
 
 @pytest.mark.parametrize("size_bytes", (3 * GIB, 5 * GIB))
-def test_deployable_q4_artifact_accepts_compact_three_to_five_gib_boundaries(
+def test_deployable_q5_artifact_accepts_compact_three_to_five_gib_boundaries(
     size_bytes: int,
 ) -> None:
     artifact = BuildArtifact.create(
-        artifact_id="incubus-v1-q4",
-        format=QuantizationFormat.Q4,
-        path="dist/incubus-v1-q4.gguf",
+        artifact_id="incubus-v1-q5",
+        format=QuantizationFormat.Q5,
+        path="dist/incubus-v1-q5.gguf",
         size_bytes=size_bytes,
         sha256=SHA_A,
     )
@@ -101,14 +111,14 @@ def test_deployable_q4_artifact_accepts_compact_three_to_five_gib_boundaries(
 
 
 @pytest.mark.parametrize("size_bytes", (3 * GIB - 1, 5 * GIB + 1))
-def test_deployable_q4_artifact_rejects_size_outside_three_to_five_gib(
+def test_deployable_q5_artifact_rejects_size_outside_three_to_five_gib(
     size_bytes: int,
 ) -> None:
     with pytest.raises(ArtifactSizeError):
         BuildArtifact.create(
-            artifact_id="incubus-v1-q4",
-            format=QuantizationFormat.Q4,
-            path="dist/incubus-v1-q4.gguf",
+            artifact_id="incubus-v1-q5",
+            format=QuantizationFormat.Q5,
+            path="dist/incubus-v1-q5.gguf",
             size_bytes=size_bytes,
             sha256=SHA_A,
         )
@@ -122,7 +132,7 @@ def test_resource_estimator_returns_reproducible_train_build_and_runtime_profile
         effective_batch_size=128,
         dataset_tokens=2_000_000_000,
         checkpoint_count=8,
-        target_format=QuantizationFormat.Q4,
+        target_format=QuantizationFormat.Q5,
     )
 
     first = estimate_resources(request)
@@ -156,7 +166,7 @@ def test_resource_estimator_rejects_zero_or_negative_inputs(field: str) -> None:
         effective_batch_size=128,
         dataset_tokens=2_000_000_000,
         checkpoint_count=8,
-        target_format=QuantizationFormat.Q4,
+        target_format=QuantizationFormat.Q5,
     )
 
     with pytest.raises(ValueError, match=field):

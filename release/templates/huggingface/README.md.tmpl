@@ -27,7 +27,7 @@ review, and benchmark report pass the v1 release gates. Values marked
 
 | File | Purpose | SHA-256 |
 | --- | --- | --- |
-| `metaflora-incubus-v1-q4.gguf` | Main local model | `${MODEL_SHA256}` |
+| `metaflora-incubus-v1.gguf` | Main local model | `${MODEL_SHA256}` |
 | `SHA256SUMS` | Checksums for the release bundle | `${CHECKSUMS_SHA256}` |
 | `THIRD_PARTY_NOTICES` | Required licences and attribution | `${NOTICES_SHA256}` |
 
@@ -58,11 +58,11 @@ loopback service.
 
 ## Ollama
 
-Download `metaflora-incubus-v1-q4.gguf` and place it next to a file named
+Download `metaflora-incubus-v1.gguf` and place it next to a file named
 `Modelfile` with this content:
 
 ```dockerfile
-FROM ./metaflora-incubus-v1-q4.gguf
+FROM ./metaflora-incubus-v1.gguf
 PARAMETER num_ctx 8192
 ```
 
@@ -82,7 +82,7 @@ Use a recent `llama-server` build with GGUF support:
 
 ```sh
 llama-server \
-  -m ./metaflora-incubus-v1-q4.gguf \
+  -m ./metaflora-incubus-v1.gguf \
   --host 127.0.0.1 \
   --port 11435 \
   -c 8192

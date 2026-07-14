@@ -11,7 +11,7 @@ The final Hugging Face repository contains:
 | File | Requirement |
 | --- | --- |
 | `README.md` | Rendered model card with no template tokens |
-| `metaflora-incubus-v1-q4.gguf` | Final release-gated GGUF artifact |
+| `metaflora-incubus-v1.gguf` | Final release-gated GGUF artifact |
 | `Modelfile` | Ollama import recipe for the local GGUF |
 | `SHA256SUMS` | Checksums generated from the exact uploaded bytes |
 | `release-manifest.json` | Release ID, model path, size, and SHA-256 |
@@ -78,7 +78,7 @@ The same GGUF artifact supports four entry paths:
 
 - the signed Incubus installer, which manages the loopback service and OpenCode
   configuration;
-- Ollama through `FROM ./metaflora-incubus-v1-q4.gguf`;
+- Ollama through `FROM ./metaflora-incubus-v1.gguf`;
 - llama.cpp through `llama-server`;
 - any client that accepts an OpenAI-compatible base URL and model ID.
 

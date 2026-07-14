@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge a trained adapter, export GGUF, and build the release Q4 candidate."""
+"""Merge a trained adapter, export GGUF, and build the release Q5 candidate."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def run_checked(arguments: list[str]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export a trained Incubus adapter to Q4 GGUF")
+    parser = argparse.ArgumentParser(description="Export a trained Incubus adapter to Q5 GGUF")
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--adapter", type=Path, required=True)
     parser.add_argument("--convert-script", type=Path, required=True)
@@ -75,7 +75,7 @@ def main() -> int:
     tokenizer.save_pretrained(merged_dir)
 
     full_gguf = output / "incubus-v1-f16.gguf"
-    q4_gguf = output / "metaflora-incubus-v1-q4.gguf"
+    deployable_gguf = output / "metaflora-incubus-v1.gguf"
     run_checked(
         [
             sys.executable,
@@ -87,20 +87,20 @@ def main() -> int:
             "f16",
         ]
     )
-    run_checked([str(quantize_binary), str(full_gguf), str(q4_gguf), "Q4_K_M"])
-    with q4_gguf.open("rb") as handle:
+    run_checked([str(quantize_binary), str(full_gguf), str(deployable_gguf), "Q5_K_M"])
+    with deployable_gguf.open("rb") as handle:
         if handle.read(4) != b"GGUF":
             raise SystemExit("quantizer did not produce a GGUF file")
-    size = q4_gguf.stat().st_size
+    size = deployable_gguf.stat().st_size
     if not 3 * 1024**3 <= size <= 5 * 1024**3:
-        raise SystemExit(f"Q4 artifact is outside the 3-5 GiB release window: {size}")
+        raise SystemExit(f"Q5 artifact is outside the 3-5 GiB release window: {size}")
     manifest = {
         "schema_version": 1,
         "candidate_state": "quantized_candidate",
         "release_ready": False,
         "artifact": {
-            "path": q4_gguf.name,
-            "sha256": sha256_file(q4_gguf),
+            "path": deployable_gguf.name,
+            "sha256": sha256_file(deployable_gguf),
             "size_bytes": size,
         },
         "required_next_step": "run_parity_and_release_gates",

@@ -11,6 +11,7 @@
     "lora_rank": 16,
     "load_in_4bit": true,
     "quantization_type": "nf4",
+    "final_gguf_quantization": "Q5_K_M",
     "final_gguf_max_bytes": 5368709120
   }
 }
