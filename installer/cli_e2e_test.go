@@ -37,6 +37,7 @@ type releaseFaults struct {
 	badArtifactSignature bool
 	badArtifactHash      bool
 	badArtifactSize      bool
+	missingRuntime       bool
 }
 
 func newFakeRelease(t *testing.T, faults releaseFaults) fakeRelease {
@@ -49,19 +50,24 @@ func newFakeReleaseVersion(t *testing.T, version string, faults releaseFaults) f
 	seed := sha256.Sum256([]byte("incubus-v1-test-release-key"))
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	publicKey := privateKey.Public().(ed25519.PublicKey)
-	artifact := testBundle(t)
-	digest := sha256.Sum256(artifact)
-	artifactHash := hex.EncodeToString(digest[:])
-	artifactSize := len(artifact)
-	artifactSignature := ed25519.Sign(privateKey, digest[:])
+	runtimeArtifact := testBundleVariant(t, !faults.missingRuntime)
+	modelArtifact := []byte("test model weights")
+	runtimeDigest := sha256.Sum256(runtimeArtifact)
+	modelDigest := sha256.Sum256(modelArtifact)
+	runtimeHash := hex.EncodeToString(runtimeDigest[:])
+	modelHash := hex.EncodeToString(modelDigest[:])
+	runtimeSize := len(runtimeArtifact)
+	modelSize := len(modelArtifact)
+	runtimeSignature := ed25519.Sign(privateKey, runtimeDigest[:])
+	modelSignature := ed25519.Sign(privateKey, modelDigest[:])
 	if faults.badArtifactHash {
-		artifactHash = strings.Repeat("0", sha256.Size*2)
+		modelHash = strings.Repeat("0", sha256.Size*2)
 	}
 	if faults.badArtifactSize {
-		artifactSize++
+		modelSize++
 	}
 	if faults.badArtifactSignature {
-		artifactSignature[0] ^= 0xff
+		modelSignature[0] ^= 0xff
 	}
 
 	requests := make(map[string]int)
@@ -77,27 +83,44 @@ func newFakeReleaseVersion(t *testing.T, version string, faults releaseFaults) f
 			_, _ = writer.Write(manifest)
 		case "/release/manifest.json.sig":
 			_, _ = writer.Write(manifestSignature)
-		case "/release/incubus-v1.tar.gz":
-			_, _ = writer.Write(artifact)
+		case "/release/incubus-runtime.tar.gz":
+			_, _ = writer.Write(runtimeArtifact)
+		case "/release/incubus-v1.gguf":
+			_, _ = writer.Write(modelArtifact)
 		default:
 			http.NotFound(writer, request)
 		}
 	}))
 
 	manifestDocument := map[string]any{
-		"schema_version": 1,
+		"schema_version": 2,
 		"release":        version,
 		"model_id":       "metaflora-incubus-v1",
 		"artifacts": []map[string]any{{
-			"id":                "test-platform-q4",
-			"os":                "darwin",
-			"arch":              "arm64",
-			"url":               server.URL + "/release/incubus-v1.tar.gz",
-			"sha256":            artifactHash,
-			"signature":         base64.StdEncoding.EncodeToString(artifactSignature),
-			"size_bytes":        artifactSize,
+			"id":                  "test-runtime",
+			"os":                  "darwin",
+			"arch":                "arm64",
+			"url":                 server.URL + "/release/incubus-runtime.tar.gz",
+			"sha256":              runtimeHash,
+			"signature":           base64.StdEncoding.EncodeToString(runtimeSignature),
+			"size_bytes":          runtimeSize,
+			"minimum_ram_bytes":   1,
+			"format":              "tar.gz",
+			"role":                "runtime",
+			"revision":            "0123456789abcdef0123456789abcdef01234567",
+			"unpacked_size_bytes": 4096,
+		}, {
+			"id":                "test-model-q4",
+			"os":                "any",
+			"arch":              "any",
+			"url":               server.URL + "/release/incubus-v1.gguf",
+			"sha256":            modelHash,
+			"signature":         base64.StdEncoding.EncodeToString(modelSignature),
+			"size_bytes":        modelSize,
 			"minimum_ram_bytes": 1,
-			"format":            "tar.gz",
+			"format":            "gguf",
+			"role":              "model",
+			"revision":          "0123456789abcdef0123456789abcdef01234567",
 		}},
 	}
 	var err error
@@ -128,15 +151,20 @@ func (release *fakeRelease) requestCount(path string) int {
 }
 
 func testBundle(t *testing.T) []byte {
+	return testBundleVariant(t, true)
+}
+
+func testBundleVariant(t *testing.T, includeRuntime bool) []byte {
 	t.Helper()
 
 	var archive bytes.Buffer
 	gzipWriter := gzip.NewWriter(&archive)
 	tarWriter := tar.NewWriter(gzipWriter)
 	files := map[string]string{
-		"bin/incubus-runtime":       "test runtime",
-		"models/incubus-v1.gguf":    "test model weights",
 		"legal/THIRD_PARTY_NOTICES": "required legal notices",
+	}
+	if includeRuntime {
+		files["bin/incubus-runtime"] = "test runtime"
 	}
 	for name, contents := range files {
 		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(contents))}
@@ -333,11 +361,64 @@ func TestInstallIsIdempotent(t *testing.T) {
 			t.Fatalf("install attempt %d failed: %s%s", attempt, stdout, stderr)
 		}
 	}
-	if got := release.requestCount("/release/incubus-v1.tar.gz"); got != 1 {
+	if got := release.requestCount("/release/incubus-runtime.tar.gz"); got != 1 {
 		t.Fatalf("artifact download count = %d, want 1", got)
+	}
+	if got := release.requestCount("/release/incubus-v1.gguf"); got != 1 {
+		t.Fatalf("direct GGUF download count = %d, want 1", got)
 	}
 	if runtime.ensureCalls != 2 {
 		t.Fatalf("runtime ensure count = %d, want 2 healthy idempotent checks", runtime.ensureCalls)
+	}
+}
+
+func TestSameReleaseFastPathRefusesModifiedWeights(t *testing.T) {
+	release := newFakeRelease(t, releaseFaults{})
+	defer release.close()
+	runtime := &runtimeHarness{}
+	defer func() {
+		if runtime.server != nil {
+			runtime.server.Close()
+		}
+	}()
+	config := testCLIConfig(t, release, runtime, &ollamaHarness{})
+	if code, _, stderr := runCLI(t, config, "install", "--non-interactive"); code != 0 {
+		t.Fatalf("install failed: %s", stderr)
+	}
+	state, err := readInstallState(filepath.Join(config.InstallRoot, "install-state.json"), config.InstallRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state.Runtime.ModelPath, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config.ProbeResources = func(context.Context, string) (Resources, error) {
+		return Resources{RAMBytes: 16 * giB, FreeDiskBytes: 0}, nil
+	}
+	ensureCalls := runtime.ensureCalls
+	code, _, stderr := runCLI(t, config, "install", "--non-interactive")
+	if code == 0 || !strings.Contains(stderr, "integrity") {
+		t.Fatalf("same-release install exit=%d stderr=%q", code, stderr)
+	}
+	if runtime.ensureCalls != ensureCalls {
+		t.Fatal("runtime was started before same-release integrity validation")
+	}
+}
+
+func TestRuntimeArchiveMustContainExecutableBeforeActivation(t *testing.T) {
+	release := newFakeRelease(t, releaseFaults{missingRuntime: true})
+	defer release.close()
+	runtime := &runtimeHarness{}
+	config := testCLIConfig(t, release, runtime, &ollamaHarness{})
+	code, _, stderr := runCLI(t, config, "install", "--non-interactive")
+	if code == 0 || !strings.Contains(stderr, "required regular executable") {
+		t.Fatalf("install exit=%d stderr=%q", code, stderr)
+	}
+	if runtime.ensureCalls != 0 {
+		t.Fatal("invalid runtime archive touched active runtime")
+	}
+	if _, err := os.Stat(filepath.Join(config.InstallRoot, "current")); !os.IsNotExist(err) {
+		t.Fatalf("invalid runtime archive activated files: %v", err)
 	}
 }
 
@@ -360,7 +441,7 @@ func TestInstallRunsInjectableResourcePreflightBeforeDownload(t *testing.T) {
 	if code == 0 || probeCalls != 1 {
 		t.Fatalf("exit/probe calls = %d/%d, want nonzero/1", code, probeCalls)
 	}
-	if got := release.requestCount("/release/incubus-v1.tar.gz"); got != 0 {
+	if got := release.requestCount("/release/incubus-runtime.tar.gz"); got != 0 {
 		t.Fatalf("artifact downloaded %d times despite failed preflight", got)
 	}
 }
@@ -491,6 +572,82 @@ func TestRuntimeFailureAfterActivationRollsBackPreviousRelease(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "rollback restart previous runtime") {
 		t.Fatalf("rollback restart failure was hidden: %s", stderr)
+	}
+}
+
+func TestFailedReplacementDownloadKeepsOldModelUntouched(t *testing.T) {
+	initial := newFakeReleaseVersion(t, "v1.0.0", releaseFaults{})
+	defer initial.close()
+	runtime := &runtimeHarness{}
+	defer func() {
+		if runtime.server != nil {
+			runtime.server.Close()
+		}
+	}()
+	config := testCLIConfig(t, initial, runtime, &ollamaHarness{})
+	if code, _, stderr := runCLI(t, config, "install", "--non-interactive"); code != 0 {
+		t.Fatalf("initial install failed: %s", stderr)
+	}
+	state, err := readInstallState(filepath.Join(config.InstallRoot, "install-state.json"), config.InstallRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broken := newFakeReleaseVersion(t, "v1.1.0", releaseFaults{badArtifactHash: true})
+	defer broken.close()
+	config.ManifestURL = broken.manifestURL
+	config.ManifestSignatureURL = broken.signatureURL
+	config.PinnedPublicKey = broken.publicKey
+	config.HTTPClient = broken.client
+	if code, _, _ := runCLI(t, config, "update"); code == 0 {
+		t.Fatal("update unexpectedly accepted corrupt replacement weights")
+	}
+	payload, err := os.ReadFile(state.Runtime.ModelPath)
+	if err != nil || string(payload) != "test model weights" {
+		t.Fatalf("old GGUF was changed after failed replacement: %q, %v", payload, err)
+	}
+	if _, err := os.Stat(filepath.Join(config.InstallRoot, "current", "bin", "incubus-runtime")); err != nil {
+		t.Fatalf("previous runtime was not preserved: %v", err)
+	}
+}
+
+func TestLowDiskUpdateRequiresExplicitUninstallInsteadOfDeletingOldGGUF(t *testing.T) {
+	initial := newFakeReleaseVersion(t, "v1.0.0", releaseFaults{})
+	defer initial.close()
+	runtime := &runtimeHarness{}
+	defer func() {
+		if runtime.server != nil {
+			runtime.server.Close()
+		}
+	}()
+	config := testCLIConfig(t, initial, runtime, &ollamaHarness{})
+	if code, _, stderr := runCLI(t, config, "install", "--non-interactive"); code != 0 {
+		t.Fatalf("initial install failed: %s", stderr)
+	}
+
+	next := newFakeReleaseVersion(t, "v1.1.0", releaseFaults{})
+	defer next.close()
+	config.ManifestURL = next.manifestURL
+	config.ManifestSignatureURL = next.signatureURL
+	config.PinnedPublicKey = next.publicKey
+	config.HTTPClient = next.client
+	freeBeforeRemoval := splitInstallReserveBytes + 4096 + uint64(len(testBundle(t))) + uint64(len("test model weights")) - 1
+	config.ProbeResources = func(context.Context, string) (Resources, error) {
+		return Resources{RAMBytes: 16 * giB, FreeDiskBytes: freeBeforeRemoval}, nil
+	}
+	code, _, stderr := runCLI(t, config, "update")
+	if code == 0 || !strings.Contains(stderr, "uninstall") {
+		t.Fatalf("low-disk update exit=%d stderr=%q", code, stderr)
+	}
+	state, err := readInstallState(filepath.Join(config.InstallRoot, "install-state.json"), config.InstallRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(state.Runtime.ModelPath); err != nil {
+		t.Fatalf("low-disk refusal removed active GGUF: %v", err)
+	}
+	if got := next.requestCount("/release/incubus-runtime.tar.gz"); got != 0 {
+		t.Fatalf("low-disk refusal downloaded runtime %d times", got)
 	}
 }
 

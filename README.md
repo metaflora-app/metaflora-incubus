@@ -1,7 +1,7 @@
 # Metaflora Incubus v1
 
 Metaflora Incubus v1 is a compact local model for programming, agentic work,
-search, and Russian and English text. The release target is a 5–6 GB download
+search, and Russian and English text. The release target is a 3–5 GB download
 that runs through a loopback API and appears in OpenCode without manual provider
 configuration.
 
@@ -19,7 +19,7 @@ The final Q4 artifact must:
 - win the required coding, tool-use, agentic-search, text, Russian, and English
   groups without a critical regression;
 - reduce unjustified refusals on a held-out set while preserving answer quality;
-- stay within the 6 GB download limit;
+- stay within the 5 GB download limit;
 - pass a clean install, transactional failed-update recovery, OpenCode discovery, and uninstall on
   every supported operating system.
 

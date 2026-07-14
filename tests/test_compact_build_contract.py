@@ -1,6 +1,8 @@
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
+
+from metaflora_incubus.benchmark_harness import BenchmarkProvenance, HarnessReport
 from metaflora_incubus.training_contract import (
     ArtifactSizeError,
     BuildArtifact,
@@ -13,8 +15,6 @@ from metaflora_incubus.training_contract import (
     ResourceEstimateInput,
     estimate_resources,
 )
-
-from metaflora_incubus.benchmark_harness import BenchmarkProvenance, HarnessReport
 
 GIB = 1024**3
 SHA_A = "a" * 64
@@ -85,8 +85,8 @@ def test_quantization_contract_is_immutable_and_cannot_skip_q4_parity() -> None:
         )
 
 
-@pytest.mark.parametrize("size_bytes", (5 * GIB, 6 * GIB))
-def test_deployable_q4_artifact_accepts_exact_five_to_six_gib_boundaries(
+@pytest.mark.parametrize("size_bytes", (3 * GIB, 5 * GIB))
+def test_deployable_q4_artifact_accepts_compact_three_to_five_gib_boundaries(
     size_bytes: int,
 ) -> None:
     artifact = BuildArtifact.create(
@@ -100,8 +100,8 @@ def test_deployable_q4_artifact_accepts_exact_five_to_six_gib_boundaries(
     assert artifact.size_bytes == size_bytes
 
 
-@pytest.mark.parametrize("size_bytes", (5 * GIB - 1, 6 * GIB + 1))
-def test_deployable_q4_artifact_rejects_size_outside_five_to_six_gib(
+@pytest.mark.parametrize("size_bytes", (3 * GIB - 1, 5 * GIB + 1))
+def test_deployable_q4_artifact_rejects_size_outside_three_to_five_gib(
     size_bytes: int,
 ) -> None:
     with pytest.raises(ArtifactSizeError):
@@ -132,7 +132,7 @@ def test_resource_estimator_returns_reproducible_train_build_and_runtime_profile
     assert first.training.gpu_vram_bytes > 0
     assert first.training.disk_bytes > first.build.disk_bytes
     assert first.build.disk_bytes >= 6 * GIB
-    assert first.runtime.disk_bytes >= 5 * GIB
+    assert first.runtime.disk_bytes == 5 * GIB
     assert first.runtime.ram_bytes >= first.runtime.disk_bytes
     assert first.recommended_profile in (ComputeProfile.SINGLE_GPU, ComputeProfile.MULTI_GPU)
 

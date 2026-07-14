@@ -17,7 +17,7 @@ dependencies = [
   "pydantic>=2.9,<3",
   "safetensors>=0.4,<1",
   "torch>=2.5,<3",
-  "transformers>=4.47,<6",
+  "transformers>=5.12,<6",
   "uvicorn>=0.30,<1",
 ]
 
@@ -29,10 +29,11 @@ dev = [
 ]
 training = [
   "accelerate>=1.2,<2",
-  "datasets>=3,<5",
-  "peft>=0.14,<1",
+  "datasets>=5,<6",
+  "bitsandbytes>=0.49,<1",
+  "peft>=0.19,<1",
   "sentencepiece>=0.2,<1",
-  "trl>=0.15,<0.16",
+  "trl>=1.8,<2",
 ]
 
 [project.scripts]

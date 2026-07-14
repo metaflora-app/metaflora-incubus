@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError
 
 import pytest
+
 from metaflora_incubus.training_contract import (
     ContaminationError,
     DatasetCatalog,
@@ -76,6 +77,21 @@ def test_dataset_record_rejects_incomplete_or_unsafe_provenance(
 
     with pytest.raises(ProvenanceError, match=field):
         DatasetRecord.create(**{**values, **override})
+
+
+@pytest.mark.parametrize("revision", ("main", "A" * 40, "a" * 39, "g" * 40))
+def test_dataset_record_requires_pinned_lowercase_source_revision(revision: str) -> None:
+    with pytest.raises(ProvenanceError, match="source_revision"):
+        DatasetRecord.create(
+            record_id="sample-001",
+            prompt="Implement a parser",
+            response="Here is the implementation",
+            source_url="https://datasets.example/item",
+            source_revision=revision,
+            collected_at="2026-07-14T12:00:00Z",
+            license_id="Apache-2.0",
+            split=DatasetSplit.TRAIN,
+        )
 
 
 def test_catalog_deduplicates_normalized_prompt_response_content() -> None:

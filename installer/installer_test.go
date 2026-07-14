@@ -29,7 +29,7 @@ func signedManifest(t *testing.T, manifestJSON string) ([]byte, []byte, ed25519.
 
 func releaseManifestJSON(artifacts string) string {
 	return `{
-  "schema_version": 1,
+  "schema_version": 2,
   "release": "v1.0.0",
   "model_id": "metaflora-incubus-v1",
   "artifacts": [` + artifacts + `]
@@ -45,6 +45,25 @@ func artifactJSON(id, osName, arch, url, digest string, size, minimumRAM uint64)
   "sha256": ` + quote(digest) + `,
   "size_bytes": ` + uintString(size) + `,
   "minimum_ram_bytes": ` + uintString(minimumRAM) + `
+  ,"format": "tar.gz",
+  "role": "runtime",
+  "revision": "0123456789abcdef0123456789abcdef01234567",
+  "unpacked_size_bytes": 1048576
+}`
+}
+
+func modelArtifactJSON(digest string, size, minimumRAM uint64) string {
+	return `{
+  "id": "incubus-v1-q4",
+  "os": "any",
+  "arch": "any",
+  "url": "https://huggingface.co/metaflora/incubus/resolve/0123456789abcdef0123456789abcdef01234567/incubus-v1.gguf",
+  "sha256": ` + quote(digest) + `,
+  "size_bytes": ` + uintString(size) + `,
+  "minimum_ram_bytes": ` + uintString(minimumRAM) + `,
+  "format": "gguf",
+  "role": "model",
+  "revision": "0123456789abcdef0123456789abcdef01234567"
 }`
 }
 
@@ -66,9 +85,9 @@ func TestParseAndVerifyManifestAcceptsValidSignature(t *testing.T) {
 		"arm64",
 		"https://downloads.metaflora.ai/incubus/v1/macos-arm64.tar.zst",
 		digest,
-		6*giB,
+		5*giB,
 		12*giB,
-	))
+	) + "," + modelArtifactJSON(strings.Repeat("e", 64), 3*giB, 12*giB))
 	payload, signature, publicKey := signedManifest(t, manifestJSON)
 
 	manifest, err := ParseAndVerifyManifest(payload, signature, publicKey)
@@ -81,8 +100,8 @@ func TestParseAndVerifyManifestAcceptsValidSignature(t *testing.T) {
 	if manifest.ModelID != "metaflora-incubus-v1" {
 		t.Fatalf("ModelID = %q, want metaflora-incubus-v1", manifest.ModelID)
 	}
-	if len(manifest.Artifacts) != 1 {
-		t.Fatalf("len(Artifacts) = %d, want 1", len(manifest.Artifacts))
+	if len(manifest.Artifacts) != 2 {
+		t.Fatalf("len(Artifacts) = %d, want 2", len(manifest.Artifacts))
 	}
 }
 
@@ -94,7 +113,7 @@ func TestParseAndVerifyManifestRejectsTampering(t *testing.T) {
 		"amd64",
 		"https://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
 		digest,
-		6*giB,
+		5*giB,
 		12*giB,
 	)))
 	tampered := bytes.Replace(payload, []byte("v1.0.0"), []byte("v1.0.1"), 1)
@@ -112,7 +131,7 @@ func TestParseAndVerifyManifestRejectsNonHTTPSArtifactURL(t *testing.T) {
 		"amd64",
 		"http://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
 		digest,
-		6*giB,
+		5*giB,
 		12*giB,
 	)))
 
@@ -126,7 +145,7 @@ func TestParseAndVerifyManifestRejectsDifferentProductID(t *testing.T) {
 	document := strings.Replace(releaseManifestJSON(artifactJSON(
 		"linux-amd64-q4", "linux", "amd64",
 		"https://downloads.metaflora.ai/incubus/v1/linux-amd64.tar.zst",
-		digest, 6*giB, 12*giB,
+		digest, 5*giB, 12*giB,
 	)), "metaflora-incubus-v1", "different-product", 1)
 	payload, signature, publicKey := signedManifest(t, document)
 	if _, err := ParseAndVerifyManifest(payload, signature, publicKey); err == nil {
@@ -158,14 +177,14 @@ func TestSelectArtifactMatchesPlatformAndResources(t *testing.T) {
 			ID:              "macos-amd64-q4",
 			OS:              "darwin",
 			Arch:            "amd64",
-			SizeBytes:       6 * giB,
+			SizeBytes:       5 * giB,
 			MinimumRAMBytes: 12 * giB,
 		},
 		{
 			ID:              "macos-arm64-q4",
 			OS:              "darwin",
 			Arch:            "arm64",
-			SizeBytes:       6 * giB,
+			SizeBytes:       5 * giB,
 			MinimumRAMBytes: 12 * giB,
 		},
 	}}
@@ -187,7 +206,7 @@ func TestSelectArtifactRefusesInsufficientResources(t *testing.T) {
 		ID:              "macos-arm64-q4",
 		OS:              "darwin",
 		Arch:            "arm64",
-		SizeBytes:       6 * giB,
+		SizeBytes:       5 * giB,
 		MinimumRAMBytes: 12 * giB,
 	}}}
 	platform := Platform{OS: "darwin", Arch: "arm64"}
@@ -207,7 +226,7 @@ func TestSelectArtifactRefusesInsufficientResources(t *testing.T) {
 			name: "disk cannot hold download and installation overhead",
 			resources: Resources{
 				RAMBytes:      16 * giB,
-				FreeDiskBytes: 6*giB + 512*miB,
+				FreeDiskBytes: 5*giB + 512*miB,
 			},
 		},
 	}
@@ -218,6 +237,39 @@ func TestSelectArtifactRefusesInsufficientResources(t *testing.T) {
 				t.Fatal("SelectArtifact() accepted insufficient host resources")
 			}
 		})
+	}
+}
+
+func TestSelectArtifactRejectsArtifactLargerThanFiveGiB(t *testing.T) {
+	manifest := Manifest{Artifacts: []Artifact{{
+		ID: "oversized", OS: "darwin", Arch: "arm64",
+		SizeBytes: 5*giB + 1, MinimumRAMBytes: 1,
+	}}}
+	_, err := SelectArtifact(manifest, Platform{OS: "darwin", Arch: "arm64"}, Resources{
+		RAMBytes: 16 * giB, FreeDiskBytes: 32 * giB,
+	})
+	if err == nil || !strings.Contains(err.Error(), "5 GiB") {
+		t.Fatalf("SelectArtifact() error = %v", err)
+	}
+}
+
+func TestSelectReleaseArtifactsEnforcesCombinedPeakDiskBudget(t *testing.T) {
+	revision := "0123456789abcdef0123456789abcdef01234567"
+	manifest := Manifest{Artifacts: []Artifact{
+		{ID: "runtime", Role: ArtifactRoleRuntime, OS: "darwin", Arch: "arm64", Format: "tar.gz", Revision: revision, SizeBytes: 64 * miB, UnpackedSizeBytes: 128 * miB, MinimumRAMBytes: 1},
+		{ID: "model", Role: ArtifactRoleModel, OS: "any", Arch: "any", Format: "gguf", Revision: revision, SizeBytes: 4 * giB, MinimumRAMBytes: 1},
+	}}
+	selected, err := SelectReleaseArtifacts(manifest, Platform{OS: "darwin", Arch: "arm64"}, Resources{RAMBytes: 16 * giB, FreeDiskBytes: 5 * giB})
+	if err != nil {
+		t.Fatalf("SelectReleaseArtifacts() error = %v", err)
+	}
+	if selected.Runtime.ID != "runtime" || selected.Model.ID != "model" || selected.PeakDiskBytes > 5*giB {
+		t.Fatalf("unexpected selection: %#v", selected)
+	}
+
+	manifest.Artifacts[1].SizeBytes = 5 * giB
+	if _, err := SelectReleaseArtifacts(manifest, Platform{OS: "darwin", Arch: "arm64"}, Resources{RAMBytes: 16 * giB, FreeDiskBytes: 16 * giB}); err == nil {
+		t.Fatal("SelectReleaseArtifacts() accepted a release whose peak exceeds 5 GiB")
 	}
 }
 

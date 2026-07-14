@@ -92,8 +92,8 @@ def main() -> int:
         if handle.read(4) != b"GGUF":
             raise SystemExit("quantizer did not produce a GGUF file")
     size = q4_gguf.stat().st_size
-    if not 5 * 1024**3 <= size <= 6 * 1024**3:
-        raise SystemExit(f"Q4 artifact is outside the 5-6 GiB release window: {size}")
+    if not 3 * 1024**3 <= size <= 5 * 1024**3:
+        raise SystemExit(f"Q4 artifact is outside the 3-5 GiB release window: {size}")
     manifest = {
         "schema_version": 1,
         "candidate_state": "quantized_candidate",

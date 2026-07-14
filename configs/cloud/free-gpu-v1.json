@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "product_id": "metaflora-incubus-v1",
+  "workspace": "/content/incubus-work",
+  "public_repo_id": "metaflora/incubus",
+  "llama_cpp_revision": "bf2c86ddc0685f580595954056c2e77ebabfab4f",
+  "profile": {
+    "max_parameter_count": 7500000000,
+    "min_vram_bytes": 16106127360,
+    "max_sequence_length": 2048,
+    "lora_rank": 16,
+    "load_in_4bit": true,
+    "quantization_type": "nf4",
+    "final_gguf_max_bytes": 5368709120
+  }
+}

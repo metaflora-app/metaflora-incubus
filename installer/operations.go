@@ -2,6 +2,8 @@ package installer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,7 +92,7 @@ func persistControlBinary(source, destination string) (string, bool, bool, error
 
 func installedState(config CLIConfig) (installState, string, error) {
 	path := filepath.Join(config.InstallRoot, "install-state.json")
-	state, err := readInstallState(path)
+	state, err := readInstallState(path, config.InstallRoot)
 	if os.IsNotExist(err) {
 		return installState{}, path, errors.New("Metaflora Incubus v1 is not installed")
 	}
@@ -100,6 +102,9 @@ func installedState(config CLIConfig) (installState, string, error) {
 func startInstalled(ctx context.Context, config CLIConfig) error {
 	state, statePath, err := installedState(config)
 	if err != nil {
+		return err
+	}
+	if err := verifyInstalledFiles(state, config); err != nil {
 		return err
 	}
 	endpoint, err := config.EnsureRuntime(ctx, state.Runtime)
@@ -142,17 +147,83 @@ func doctorInstalled(ctx context.Context, output io.Writer, config CLIConfig) er
 	if err != nil {
 		return err
 	}
-	for _, path := range []string{state.Runtime.ModelPath, filepath.Join(config.InstallRoot, "current", "bin", runtimeBinaryName(config.Platform.OS))} {
-		info, statErr := os.Stat(path)
-		if statErr != nil || !info.Mode().IsRegular() {
-			return fmt.Errorf("required runtime file is missing: %s", path)
-		}
+	if err := verifyInstalledFiles(state, config); err != nil {
+		return err
 	}
 	if err := checkRuntimeHealth(ctx, config.HTTPClient, state.RuntimeBaseURL); err != nil {
 		return fmt.Errorf("runtime health check failed: %w", err)
 	}
 	_, err = fmt.Fprintln(output, "doctor: installation and runtime are healthy")
 	return err
+}
+
+func verifyInstalledFiles(state installState, config CLIConfig) error {
+	runtimePath := filepath.Join(config.InstallRoot, "current", "bin", runtimeBinaryName(config.Platform.OS))
+	for _, path := range []string{state.Runtime.ModelPath, runtimePath} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("required installed file is missing or unsafe: %s", path)
+		}
+	}
+	if !strings.EqualFold(config.Platform.OS, "windows") {
+		info, _ := os.Stat(runtimePath)
+		if info.Mode().Perm()&0o111 == 0 {
+			return errors.New("installed runtime is not executable")
+		}
+	}
+	modelSHA256, modelSizeBytes, err := fileIntegrity(state.Runtime.ModelPath)
+	if err != nil {
+		return fmt.Errorf("model integrity check failed: %w", err)
+	}
+	if modelSHA256 != state.ModelSHA256 || modelSizeBytes != state.ModelSizeBytes {
+		return errors.New("model integrity check failed: installed weights were modified")
+	}
+	return nil
+}
+
+func validateStagedRuntime(staging, osName string) error {
+	runtimePath := filepath.Join(staging, "bin", runtimeBinaryName(osName))
+	info, err := os.Lstat(runtimePath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("runtime artifact does not contain the required regular executable")
+	}
+	if !strings.EqualFold(osName, "windows") && info.Mode().Perm()&0o111 == 0 {
+		return errors.New("runtime artifact executable has unsafe permissions")
+	}
+	return nil
+}
+
+func fileIntegrity(path string) (string, uint64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	written, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), uint64(written), nil
+}
+
+func ValidateHostedArtifact(artifact Artifact) error {
+	if artifact.SizeBytes == 0 || artifact.SizeBytes > maximumArtifactBytes {
+		return errors.New("hosted release must be no larger than 5 GiB")
+	}
+	parsed, err := url.Parse(artifact.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "huggingface.co" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" {
+		return errors.New("release must use a credential-free Hugging Face HTTPS URL")
+	}
+	parts := strings.Split(parsed.EscapedPath(), "/")
+	if len(parts) < 6 || parts[1] != "metaflora" || parts[2] != "incubus" || parts[3] != "resolve" || parts[4] == "" || parts[5] == "" {
+		return errors.New("release must be downloaded directly from metaflora/incubus")
+	}
+	revision, revisionErr := hex.DecodeString(artifact.Revision)
+	if revisionErr != nil || len(artifact.Revision) != 40 || len(revision) != 20 || parts[4] != artifact.Revision {
+		return errors.New("release URL must pin an immutable 40-character commit revision")
+	}
+	return nil
 }
 
 func runtimeBinaryName(osName string) string {

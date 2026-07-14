@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         "publish-hf", help="validate and publish a signed Hugging Face release bundle"
     )
     publish_hf.add_argument("--bundle", type=Path, required=True)
-    publish_hf.add_argument("--repo-id", default="metaflora-app/metaflora-incubus-v1")
+    publish_hf.add_argument("--repo-id", default="metaflora/incubus")
     publish_hf.add_argument("--dry-run", action="store_true")
     publish_hf.add_argument("--public-key", type=Path)
     publish_hf.add_argument("--prohibited-identifiers", type=Path)

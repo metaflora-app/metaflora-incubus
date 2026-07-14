@@ -74,6 +74,7 @@ func NewProductionCLIConfig(options ProductionOptions) (CLIConfig, error) {
 		RegisterOllama: registerOllama, UnregisterOllama: unregisterOllama,
 		ControlBinarySource:      executable,
 		ControlBinaryDestination: filepath.Join(home, ".local", "bin", controlBinaryName(platform.OS)),
+		ValidateArtifact:         ValidateHostedArtifact,
 	}, nil
 }
 
@@ -158,7 +159,19 @@ func (service nativeUserService) stop(ctx context.Context, runtimeSpec RuntimeSp
 		return pathErr
 	}
 	lifecycle = service.lifecycleAtPath(lifecycle, definitionPath)
-	return service.runner.Run(ctx, lifecycle.Stop)
+	err = service.runner.Run(ctx, lifecycle.Stop)
+	if service.platform.OS == "darwin" && isMissingLaunchdService(err) {
+		return nil
+	}
+	return err
+}
+
+func isMissingLaunchdService(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "could not find service") || strings.Contains(message, "no such process") || strings.Contains(message, "service not found")
 }
 
 func (service nativeUserService) lifecycleAtPath(lifecycle ServiceLifecycle, definitionPath string) ServiceLifecycle {

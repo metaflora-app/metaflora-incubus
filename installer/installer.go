@@ -14,6 +14,13 @@ import (
 )
 
 const diskOverheadBytes = uint64(2 * 1024 * 1024 * 1024)
+const maximumArtifactBytes = uint64(5 * 1024 * 1024 * 1024)
+const splitInstallReserveBytes = uint64(256 * 1024 * 1024)
+
+const (
+	ArtifactRoleRuntime = "runtime"
+	ArtifactRoleModel   = "model"
+)
 
 type Manifest struct {
 	SchemaVersion int        `json:"schema_version"`
@@ -23,15 +30,24 @@ type Manifest struct {
 }
 
 type Artifact struct {
-	ID              string `json:"id"`
-	OS              string `json:"os"`
-	Arch            string `json:"arch"`
-	URL             string `json:"url"`
-	SHA256          string `json:"sha256"`
-	SizeBytes       uint64 `json:"size_bytes"`
-	MinimumRAMBytes uint64 `json:"minimum_ram_bytes"`
-	Signature       string `json:"signature"`
-	Format          string `json:"format"`
+	ID                string `json:"id"`
+	OS                string `json:"os"`
+	Arch              string `json:"arch"`
+	URL               string `json:"url"`
+	SHA256            string `json:"sha256"`
+	SizeBytes         uint64 `json:"size_bytes"`
+	MinimumRAMBytes   uint64 `json:"minimum_ram_bytes"`
+	Signature         string `json:"signature"`
+	Format            string `json:"format"`
+	Role              string `json:"role"`
+	Revision          string `json:"revision"`
+	UnpackedSizeBytes uint64 `json:"unpacked_size_bytes,omitempty"`
+}
+
+type ReleaseArtifacts struct {
+	Runtime       Artifact
+	Model         Artifact
+	PeakDiskBytes uint64
 }
 
 type Platform struct {
@@ -65,31 +81,100 @@ func ParseAndVerifyManifest(payload, signature []byte, publicKey ed25519.PublicK
 	if err := decoder.Decode(&manifest); err != nil {
 		return Manifest{}, fmt.Errorf("decode manifest: %w", err)
 	}
-	if manifest.SchemaVersion != 1 || manifest.Release == "" || manifest.ModelID == "" || len(manifest.Artifacts) == 0 {
+	if manifest.SchemaVersion != 2 || manifest.Release == "" || manifest.ModelID == "" || len(manifest.Artifacts) < 2 {
 		return Manifest{}, errors.New("invalid manifest metadata")
 	}
 	if manifest.ModelID != "metaflora-incubus-v1" {
 		return Manifest{}, errors.New("manifest model id does not match this product")
 	}
 	seen := make(map[string]struct{}, len(manifest.Artifacts))
+	modelCount := 0
+	runtimeCount := 0
 	for _, artifact := range manifest.Artifacts {
 		parsed, err := url.Parse(artifact.URL)
 		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
 			return Manifest{}, fmt.Errorf("artifact %q must use a credential-free HTTPS URL", artifact.ID)
 		}
-		if artifact.ID == "" || artifact.SizeBytes == 0 || artifact.MinimumRAMBytes == 0 {
+		revision, revisionErr := hex.DecodeString(artifact.Revision)
+		if artifact.ID == "" || artifact.SizeBytes == 0 || artifact.MinimumRAMBytes == 0 || revisionErr != nil || len(revision) != 20 || len(artifact.Revision) != 40 {
 			return Manifest{}, fmt.Errorf("artifact %q has incomplete metadata", artifact.ID)
 		}
 		if _, duplicate := seen[artifact.ID]; duplicate {
 			return Manifest{}, fmt.Errorf("duplicate artifact id %q", artifact.ID)
 		}
 		seen[artifact.ID] = struct{}{}
+		switch artifact.Role {
+		case ArtifactRoleModel:
+			modelCount++
+			if artifact.Format != "gguf" || artifact.UnpackedSizeBytes != 0 {
+				return Manifest{}, errors.New("model artifact must be a direct GGUF download")
+			}
+		case ArtifactRoleRuntime:
+			runtimeCount++
+			if artifact.Format != "tar.gz" || artifact.UnpackedSizeBytes == 0 {
+				return Manifest{}, errors.New("runtime artifact must declare its unpacked size")
+			}
+		default:
+			return Manifest{}, fmt.Errorf("artifact %q has invalid role", artifact.ID)
+		}
 		digest, err := hex.DecodeString(artifact.SHA256)
 		if err != nil || len(digest) != sha256.Size {
 			return Manifest{}, fmt.Errorf("artifact %q has invalid SHA-256", artifact.ID)
 		}
 	}
+	if modelCount != 1 || runtimeCount == 0 {
+		return Manifest{}, errors.New("manifest must contain one model and at least one runtime")
+	}
 	return manifest, nil
+}
+
+func SelectReleaseArtifacts(manifest Manifest, platform Platform, resources Resources) (ReleaseArtifacts, error) {
+	normalized, err := NormalizePlatform(platform.OS, platform.Arch)
+	if err != nil {
+		return ReleaseArtifacts{}, err
+	}
+	var model Artifact
+	var runtimeArtifact Artifact
+	for _, artifact := range manifest.Artifacts {
+		switch artifact.Role {
+		case ArtifactRoleModel:
+			model = artifact
+		case ArtifactRoleRuntime:
+			candidate, normalizeErr := NormalizePlatform(artifact.OS, artifact.Arch)
+			if normalizeErr == nil && candidate == normalized {
+				runtimeArtifact = artifact
+			}
+		}
+	}
+	if model.ID == "" || runtimeArtifact.ID == "" {
+		return ReleaseArtifacts{}, errors.New("no compatible split release artifacts")
+	}
+	minimumRAM := model.MinimumRAMBytes
+	if runtimeArtifact.MinimumRAMBytes > minimumRAM {
+		minimumRAM = runtimeArtifact.MinimumRAMBytes
+	}
+	if resources.RAMBytes < minimumRAM {
+		return ReleaseArtifacts{}, errors.New("insufficient RAM")
+	}
+	peak, overflow := checkedSum(model.SizeBytes, runtimeArtifact.SizeBytes, runtimeArtifact.UnpackedSizeBytes, splitInstallReserveBytes)
+	if overflow || peak > maximumArtifactBytes {
+		return ReleaseArtifacts{}, errors.New("split release exceeds the 5 GiB peak-disk limit")
+	}
+	if resources.FreeDiskBytes < peak {
+		return ReleaseArtifacts{}, errors.New("insufficient free disk for split release")
+	}
+	return ReleaseArtifacts{Runtime: runtimeArtifact, Model: model, PeakDiskBytes: peak}, nil
+}
+
+func checkedSum(values ...uint64) (uint64, bool) {
+	var total uint64
+	for _, value := range values {
+		if value > ^uint64(0)-total {
+			return 0, true
+		}
+		total += value
+	}
+	return total, false
 }
 
 func VerifySHA256(reader io.Reader, expected string) error {
@@ -127,6 +212,9 @@ func SelectArtifact(manifest Manifest, platform Platform, resources Resources) (
 		candidate, err := NormalizePlatform(artifact.OS, artifact.Arch)
 		if err != nil || candidate != normalized {
 			continue
+		}
+		if artifact.SizeBytes > maximumArtifactBytes {
+			return Artifact{}, errors.New("release artifact exceeds the 5 GiB product limit")
 		}
 		if resources.RAMBytes < artifact.MinimumRAMBytes {
 			return Artifact{}, errors.New("insufficient RAM")

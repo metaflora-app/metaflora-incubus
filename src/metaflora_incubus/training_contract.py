@@ -20,6 +20,7 @@ from metaflora_incubus.benchmark_harness import (
 
 GIB = 1024**3
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REVISION40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ProvenanceError(ValueError):
@@ -92,12 +93,14 @@ class DatasetRecord:
             "record_id",
             "prompt",
             "response",
-            "source_revision",
             "license_id",
         ):
             value = values.get(field)
             if not isinstance(value, str) or not value.strip():
                 raise ProvenanceError(f"invalid {field}")
+        source_revision = values.get("source_revision")
+        if not isinstance(source_revision, str) or _REVISION40.fullmatch(source_revision) is None:
+            raise ProvenanceError("invalid source_revision")
         source_url = values.get("source_url")
         if not isinstance(source_url, str):
             raise ProvenanceError("invalid source_url")
@@ -121,7 +124,7 @@ class DatasetRecord:
             prompt=_normalize(prompt),
             response=_normalize(response),
             source_url=source_url,
-            source_revision=str(values["source_revision"]).strip(),
+            source_revision=source_revision,
             collected_at=collected_at,
             license_id=str(values["license_id"]).strip(),
             split=split,
@@ -535,9 +538,9 @@ class BuildArtifact:
     def create(cls, **values: object) -> BuildArtifact:
         if (
             values.get("format") is QuantizationFormat.Q4
-            and not 5 * GIB <= int(values["size_bytes"]) <= 6 * GIB
+            and not 3 * GIB <= int(values["size_bytes"]) <= 5 * GIB
         ):
-            raise ArtifactSizeError("Q4 artifact must be between 5 and 6 GiB")
+            raise ArtifactSizeError("Q4 artifact must be between 3 and 5 GiB")
         if not isinstance(values.get("sha256"), str) or not _SHA256.fullmatch(
             str(values["sha256"])
         ):
@@ -593,7 +596,7 @@ def estimate_resources(request: ResourceEstimateInput) -> ResourceEstimate:
     training_vram = parameter_bytes + optimizer_bytes + activation_bytes
     build_disk = max(6 * GIB, parameter_bytes * 2)
     training_disk = build_disk + request.checkpoint_count * (parameter_bytes + optimizer_bytes)
-    runtime_disk = 6 * GIB if request.target_format is QuantizationFormat.Q4 else parameter_bytes
+    runtime_disk = 5 * GIB if request.target_format is QuantizationFormat.Q4 else parameter_bytes
     return ResourceEstimate(
         training=ResourceProfile(training_vram, training_vram * 2, training_disk),
         build=ResourceProfile(parameter_bytes, parameter_bytes * 2, build_disk),

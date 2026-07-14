@@ -93,9 +93,9 @@ class PublicationPolicy:
     @classmethod
     def default(cls) -> PublicationPolicy:
         return cls(
-            repo_id="metaflora-app/metaflora-incubus-v1",
-            min_model_bytes=5 * 1024**3,
-            max_model_bytes=6 * 1024**3,
+            repo_id="metaflora/incubus",
+            min_model_bytes=3 * 1024**3,
+            max_model_bytes=5 * 1024**3,
             prohibited_identifiers=(),
         )
 

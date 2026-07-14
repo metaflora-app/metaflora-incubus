@@ -56,6 +56,7 @@ type CLIConfig struct {
 	BeforeActivate           func(stagingDir, targetDir string) error
 	ControlBinarySource      string
 	ControlBinaryDestination string
+	ValidateArtifact         func(Artifact) error
 }
 
 type installState struct {
@@ -68,6 +69,8 @@ type installState struct {
 	Ollama            *OllamaProfile  `json:"ollama,omitempty"`
 	RuntimeBaseURL    string          `json:"runtime_base_url,omitempty"`
 	ControlBinary     string          `json:"control_binary,omitempty"`
+	ModelSHA256       string          `json:"model_sha256"`
+	ModelSizeBytes    uint64          `json:"model_size_bytes"`
 }
 
 func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer, config CLIConfig) int {
@@ -152,23 +155,38 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 	if err != nil {
 		return fmt.Errorf("resource preflight: %w", err)
 	}
-	artifact, err := SelectArtifact(manifest, config.Platform, resources)
+	statePath := filepath.Join(config.InstallRoot, "install-state.json")
+	previousState, previousStateError := readInstallState(statePath, config.InstallRoot)
+	matchedArtifacts, err := SelectReleaseArtifacts(manifest, config.Platform, Resources{RAMBytes: resources.RAMBytes, FreeDiskBytes: ^uint64(0)})
 	if err != nil {
 		return err
 	}
-	statePath := filepath.Join(config.InstallRoot, "install-state.json")
-	previousState, previousStateError := readInstallState(statePath)
+	if config.ValidateArtifact != nil {
+		for _, artifact := range []Artifact{matchedArtifacts.Runtime, matchedArtifacts.Model} {
+			if err := config.ValidateArtifact(artifact); err != nil {
+				return fmt.Errorf("hosted artifact policy: %w", err)
+			}
+		}
+	}
+	releaseArtifactID := matchedArtifacts.Runtime.ID + "+" + matchedArtifacts.Model.ID
 	if previousStateError == nil && previousState.Ollama != nil {
 		registerOllama = true
 	}
-	if previousStateError == nil && previousState.Release == manifest.Release && previousState.ArtifactID == artifact.ID {
+	if previousStateError == nil && previousState.Release == manifest.Release && previousState.ArtifactID == releaseArtifactID {
+		if err := verifyInstalledFiles(previousState, config); err != nil {
+			return fmt.Errorf("same-release integrity check failed; run incubusctl update or reinstall: %w", err)
+		}
 		_, err = config.EnsureRuntime(ctx, previousState.Runtime)
 		return err
 	}
-
-	if artifact.Format != "tar.gz" {
-		return errors.New("unsupported artifact format")
+	releaseArtifacts, err := SelectReleaseArtifacts(manifest, config.Platform, resources)
+	if err != nil {
+		if previousStateError == nil && strings.Contains(err.Error(), "disk") {
+			return errors.New("safe update requires space for both old and new weights; run incubusctl uninstall, then install again to update on a low-disk machine")
+		}
+		return err
 	}
+
 	if err := os.MkdirAll(config.InstallRoot, 0o700); err != nil {
 		return err
 	}
@@ -179,15 +197,29 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 	defer os.RemoveAll(staging)
 	archivePath := filepath.Join(staging, "release.tar.gz")
 	if err := downloadArtifact(
-		ctx, config.HTTPClient, artifact, config.PinnedPublicKey, archivePath,
+		ctx, config.HTTPClient, releaseArtifacts.Runtime, config.PinnedPublicKey, archivePath,
 	); err != nil {
 		return err
 	}
-	if err := extractTarGzip(archivePath, staging); err != nil {
+	if err := extractTarGzip(archivePath, staging, releaseArtifacts.Runtime.UnpackedSizeBytes); err != nil {
 		return err
 	}
 	if err := os.Remove(archivePath); err != nil {
 		return err
+	}
+	if err := validateStagedRuntime(staging, config.Platform.OS); err != nil {
+		return err
+	}
+	modelDestination := filepath.Join(staging, "models", "incubus-v1.gguf")
+	if err := os.MkdirAll(filepath.Dir(modelDestination), 0o700); err != nil {
+		return err
+	}
+	if err := downloadArtifact(ctx, config.HTTPClient, releaseArtifacts.Model, config.PinnedPublicKey, modelDestination); err != nil {
+		return fmt.Errorf("download direct GGUF: %w", err)
+	}
+	modelSHA256, modelSizeBytes, err := fileIntegrity(modelDestination)
+	if err != nil {
+		return fmt.Errorf("inspect hosted model: %w", err)
 	}
 	runtimeSpec := RuntimeSpec{
 		Host:      "127.0.0.1",
@@ -300,12 +332,14 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 	state := installState{
 		SchemaVersion:     1,
 		Release:           manifest.Release,
-		ArtifactID:        artifact.ID,
+		ArtifactID:        releaseArtifactID,
 		Runtime:           runtimeSpec,
 		PreviousProvider:  originalProvider,
 		InstalledProvider: installedProvider,
 		RuntimeBaseURL:    endpoint.BaseURL,
 		ControlBinary:     controlDestination,
+		ModelSHA256:       modelSHA256,
+		ModelSizeBytes:    modelSizeBytes,
 	}
 	if registerOllama {
 		if config.RegisterOllama == nil {
@@ -336,8 +370,11 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 
 func uninstall(ctx context.Context, config CLIConfig) error {
 	statePath := filepath.Join(config.InstallRoot, "install-state.json")
-	state, err := readInstallState(statePath)
+	state, err := readInstallState(statePath, config.InstallRoot)
 	if err != nil {
+		return err
+	}
+	if err := validateManagedControlBinary(state, config); err != nil {
 		return err
 	}
 	if err := config.StopRuntime(ctx, state.Runtime); err != nil {
@@ -363,6 +400,20 @@ func uninstall(ctx context.Context, config CLIConfig) error {
 		if err := os.Remove(state.ControlBinary); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateManagedControlBinary(state installState, config CLIConfig) error {
+	if state.ControlBinary == "" {
+		return nil
+	}
+	expected := config.ControlBinaryDestination
+	if expected == "" {
+		expected = filepath.Join(config.InstallRoot, "bin", controlBinaryName(config.Platform.OS))
+	}
+	if !managedExactPath(state.ControlBinary, expected, filepath.Dir(expected)) {
+		return errors.New("install state control binary path is outside the managed destination")
 	}
 	return nil
 }
@@ -439,7 +490,10 @@ func downloadArtifact(
 	return nil
 }
 
-func extractTarGzip(archivePath, destination string) error {
+func extractTarGzip(archivePath, destination string, maximumExpandedBytes uint64) error {
+	if maximumExpandedBytes == 0 {
+		return errors.New("runtime expanded-size limit is missing")
+	}
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -451,6 +505,7 @@ func extractTarGzip(archivePath, destination string) error {
 	}
 	defer gzipReader.Close()
 	reader := tar.NewReader(gzipReader)
+	var expandedBytes uint64
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
@@ -459,6 +514,10 @@ func extractTarGzip(archivePath, destination string) error {
 		if err != nil {
 			return err
 		}
+		if header.Size < 0 || uint64(header.Size) > maximumExpandedBytes-expandedBytes {
+			return errors.New("runtime archive exceeds its signed expanded-size limit")
+		}
+		expandedBytes += uint64(header.Size)
 		clean := filepath.Clean(header.Name)
 		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return errors.New("artifact contains an unsafe path")
@@ -672,8 +731,12 @@ func normalizeJSONC(payload []byte) []byte {
 	return result
 }
 
-func readInstallState(path string) (installState, error) {
+func readInstallState(path, installRoot string) (installState, error) {
 	var state installState
+	expectedStatePath := filepath.Join(filepath.Clean(installRoot), "install-state.json")
+	if !filepath.IsAbs(installRoot) || filepath.Clean(path) != expectedStatePath {
+		return state, errors.New("install state path is outside the managed install root")
+	}
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		return state, err
@@ -681,10 +744,41 @@ func readInstallState(path string) (installState, error) {
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return state, err
 	}
-	if state.SchemaVersion != 1 || state.Release == "" || state.ArtifactID == "" || state.Runtime.Host != "127.0.0.1" {
+	digest, digestErr := hex.DecodeString(state.ModelSHA256)
+	if state.SchemaVersion != 1 || state.Release == "" || state.ArtifactID == "" || state.Runtime.Host != "127.0.0.1" || digestErr != nil || len(digest) != sha256.Size || state.ModelSizeBytes == 0 {
 		return state, errors.New("invalid install state")
 	}
+	expectedModelPath := filepath.Join(filepath.Clean(installRoot), "current", "models", "incubus-v1.gguf")
+	if !managedExactPath(state.Runtime.ModelPath, expectedModelPath, installRoot) {
+		return state, errors.New("install state model path is outside the managed install root")
+	}
 	return state, nil
+}
+
+func managedExactPath(path, expected, root string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != filepath.Clean(expected) {
+		return false
+	}
+	cleanRoot := filepath.Clean(root)
+	relative, err := filepath.Rel(cleanRoot, filepath.Clean(path))
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	cursor := cleanRoot
+	components := append([]string{"."}, strings.Split(relative, string(filepath.Separator))...)
+	for _, component := range components {
+		if component != "." {
+			cursor = filepath.Join(cursor, component)
+		}
+		info, lstatErr := os.Lstat(cursor)
+		if lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		if lstatErr != nil && !os.IsNotExist(lstatErr) {
+			return false
+		}
+	}
+	return true
 }
 
 func writeJSON(path string, value any) error {
