@@ -390,6 +390,8 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert notebook["metadata"]["accelerator"] == "GPU"
     assert "google.colab" in source
     assert 'userdata.get("INCUBUS_BOOTSTRAP")' in source
+    assert "notebook access is disabled" in source
+    assert 'RuntimeError("INCUBUS_BOOTSTRAP is empty")' in source
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
