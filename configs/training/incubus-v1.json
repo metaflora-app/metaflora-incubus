@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "product_id": "metaflora-incubus-v1",
+  "config_sha256_env": "INCUBUS_TRAIN_CONFIG_SHA256",
+  "source": {
+    "path_env": "INCUBUS_BUILD_INPUT",
+    "sha256_env": "INCUBUS_BUILD_INPUT_SHA256"
+  },
+  "dataset": {
+    "manifest_env": "INCUBUS_DATASET_MANIFEST",
+    "sha256_env": "INCUBUS_DATASET_SHA256"
+  },
+  "output_dir": "artifacts/incubus-v1",
+  "seed": 1701,
+  "sequence_length": 32768,
+  "effective_batch_size": 128,
+  "per_device_train_batch_size": 1,
+  "learning_rate": 0.00002,
+  "epochs": 2,
+  "precision": "bf16",
+  "licenses": {
+    "allowed": ["Apache-2.0", "MIT", "CC-BY-4.0"],
+    "forbidden": ["unknown", "all-rights-reserved"]
+  },
+  "lora": {
+    "rank": 64,
+    "alpha": 128,
+    "dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "stages": [
+    {
+      "kind": "sft",
+      "seed": 1701,
+      "data_mix": {
+        "code": 0.35,
+        "agentic_tools": 0.25,
+        "russian_text": 0.2,
+        "english_text": 0.2
+      },
+      "max_steps": 12000,
+      "checkpoint_every": 500
+    },
+    {
+      "kind": "preference_distillation",
+      "seed": 1702,
+      "data_mix": {
+        "code": 0.35,
+        "agentic_tools": 0.25,
+        "russian_text": 0.2,
+        "english_text": 0.2
+      },
+      "max_steps": 6000,
+      "checkpoint_every": 250
+    }
+  ]
+}

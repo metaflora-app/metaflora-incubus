@@ -1,0 +1,2 @@
+FROM ./metaflora-incubus-v1-q4.gguf
+PARAMETER num_ctx 8192

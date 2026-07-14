@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "artifact_sha256": "${MODEL_SHA256}",
+  "suite_id": "incubus-release-v1",
+  "status": "NOT_MEASURED",
+  "gate_input": {
+    "candidate": ${FULL_PRECISION_REPORT_JSON},
+    "deployable_candidate": ${Q4_REPORT_JSON},
+    "baselines": ${BASELINE_REPORTS_JSON},
+    "policy": ${RELEASE_GATE_POLICY_JSON}
+  }
+}

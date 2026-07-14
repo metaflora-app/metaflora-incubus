@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+version='__INSTALLER_VERSION__'
+release_base='https://github.com/metaflora-app/metaflora-incubus/releases/download'
+
+case "$(uname -s)" in
+  Darwin) os='darwin' ;;
+  Linux) os='linux' ;;
+  *) printf '%s\n' 'Metaflora Incubus v1 does not support this operating system.' >&2; exit 1 ;;
+esac
+
+case "$(uname -m)" in
+  arm64|aarch64) arch='arm64' ;;
+  x86_64|amd64) arch='amd64' ;;
+  *) printf '%s\n' 'Metaflora Incubus v1 does not support this CPU architecture.' >&2; exit 1 ;;
+esac
+
+artifact="incubusctl-${os}-${arch}.tar.gz"
+case "${os}-${arch}" in
+  darwin-arm64) expected='__SHA256_DARWIN_ARM64__' ;;
+  darwin-amd64) expected='__SHA256_DARWIN_AMD64__' ;;
+  linux-arm64) expected='__SHA256_LINUX_ARM64__' ;;
+  linux-amd64) expected='__SHA256_LINUX_AMD64__' ;;
+esac
+
+case "$version$expected" in
+  *__*) printf '%s\n' 'Installer release metadata is incomplete.' >&2; exit 1 ;;
+esac
+
+temporary="$(mktemp -d "${TMPDIR:-/tmp}/incubus-install.XXXXXX")"
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+url="${release_base}/${version}/${artifact}"
+curl --fail --location --proto '=https' --tlsv1.2 --output "$temporary/$artifact" "$url"
+
+if command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$temporary/$artifact" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$temporary/$artifact" | awk '{print $1}')"
+else
+  printf '%s\n' 'A SHA-256 utility is required.' >&2
+  exit 1
+fi
+
+[ "$actual" = "$expected" ] || {
+  printf '%s\n' 'Installer checksum mismatch. Nothing was installed.' >&2
+  exit 1
+}
+
+tar -xzf "$temporary/$artifact" -C "$temporary"
+chmod 700 "$temporary/incubusctl"
+
+path_line='export PATH="$HOME/.local/bin:$PATH"'
+case "${SHELL:-}" in
+  */zsh) profile="$HOME/.zprofile" ;;
+  *) profile="$HOME/.profile" ;;
+esac
+if [ -L "$profile" ]; then
+  printf '%s\n' "Refusing to modify symlinked shell profile: $profile" >&2
+  exit 1
+fi
+if ! grep -Fqx "$path_line" "$profile" 2>/dev/null; then
+  umask 077
+  printf '\n%s\n' "$path_line" >> "$profile"
+fi
+export PATH="$HOME/.local/bin:$PATH"
+"$temporary/incubusctl" install --non-interactive "$@"
+printf '%s\n' 'Metaflora Incubus v1 ready. Open a new terminal before using incubusctl.'

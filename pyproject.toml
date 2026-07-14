@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "metaflora-incubus"
+version = "0.1.0"
+description = "Local model transformation and evaluation toolkit for Metaflora Incubus v1"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Metaflora" }]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "cryptography>=44,<47",
+  "huggingface-hub>=0.28,<1",
+  "pydantic>=2.9,<3",
+  "safetensors>=0.4,<1",
+  "torch>=2.5,<3",
+  "transformers>=4.47,<6",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.8,<1",
+]
+training = [
+  "accelerate>=1.2,<2",
+  "datasets>=3,<5",
+  "peft>=0.14,<1",
+  "sentencepiece>=0.2,<1",
+  "trl>=0.15,<0.16",
+]
+
+[project.scripts]
+incubus = "metaflora_incubus.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=metaflora_incubus --cov-report=term-missing --cov-fail-under=80"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["metaflora_incubus"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/metaflora_incubus"]

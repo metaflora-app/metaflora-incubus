@@ -1,0 +1,208 @@
+---
+language:
+  - ru
+  - en
+pipeline_tag: text-generation
+tags:
+  - gguf
+  - local
+  - code
+  - tool-use
+  - russian
+  - english
+license: "${HF_LICENSE_ID}"
+---
+
+# Metaflora Incubus v1
+
+Metaflora Incubus v1 is a compact local text model for programming, repository
+work, tool calls, agentic search, and Russian and English writing. The primary
+GGUF download is 5–6 GB. A computer with 16 GB of RAM is recommended.
+
+This card is published only after the release artifact, checksums, licence
+review, and benchmark report pass the v1 release gates. Values marked
+`NOT_MEASURED` must be replaced from signed benchmark artifacts before upload.
+
+## Files
+
+| File | Purpose | SHA-256 |
+| --- | --- | --- |
+| `metaflora-incubus-v1-q4.gguf` | Main local model | `${MODEL_SHA256}` |
+| `SHA256SUMS` | Checksums for the release bundle | `${CHECKSUMS_SHA256}` |
+| `THIRD_PARTY_NOTICES` | Required licences and attribution | `${NOTICES_SHA256}` |
+
+The release is invalid if any `${...}` token remains in this card or in the
+uploaded bundle.
+
+## Fast installation
+
+The signed installer downloads the GGUF file, verifies its SHA-256 checksum,
+starts a loopback-only API, and adds Metaflora Incubus v1 to supported local
+clients.
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://metaflora.ai/incubus/install | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://metaflora.ai/incubus/install.ps1 | iex
+```
+
+After installation, select `Metaflora Incubus v1` in OpenCode. The installer
+manages the local endpoint and its client entry. No API key is required for the
+loopback service.
+
+## Ollama
+
+Download `metaflora-incubus-v1-q4.gguf` and place it next to a file named
+`Modelfile` with this content:
+
+```dockerfile
+FROM ./metaflora-incubus-v1-q4.gguf
+PARAMETER num_ctx 8192
+```
+
+Create and run the local model:
+
+```sh
+ollama create metaflora-incubus:v1 -f Modelfile
+ollama run metaflora-incubus:v1
+```
+
+The GGUF metadata carries the chat template. Do not add a different `TEMPLATE`
+line unless a release note explicitly requires it.
+
+## llama.cpp
+
+Use a recent `llama-server` build with GGUF support:
+
+```sh
+llama-server \
+  -m ./metaflora-incubus-v1-q4.gguf \
+  --host 127.0.0.1 \
+  --port 11435 \
+  -c 8192
+```
+
+The server exposes an OpenAI-compatible API at
+`http://127.0.0.1:11435/v1`.
+
+## Any OpenAI-compatible client
+
+Set the client fields to:
+
+| Field | Value |
+| --- | --- |
+| Base URL | `http://127.0.0.1:11435/v1` |
+| API key | leave empty, or use `local` if the client requires a value |
+| Model ID | `metaflora-incubus-v1` |
+| Display name | `Metaflora Incubus v1` |
+
+Test the endpoint directly:
+
+```sh
+curl http://127.0.0.1:11435/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "metaflora-incubus-v1",
+    "messages": [{"role": "user", "content": "Write a small HTTP server."}],
+    "temperature": 0.2
+  }'
+```
+
+Keep the service bound to `127.0.0.1`. Public network exposure requires
+authentication, request limits, logging controls, and a separate security
+review.
+
+## Intended use
+
+The model is built for:
+
+- code generation, explanation, review, and repository edits;
+- structured tool calls in compatible agent clients;
+- search tasks where the client supplies a search tool and returns sources;
+- Russian and English drafting, editing, summarisation, and analysis;
+- private local inference on a single-user computer.
+
+The model itself has no network access. Search, shell commands, file changes,
+and other actions come from the client and its configured tools.
+
+## Refusal behaviour
+
+The local runtime adds no cloud moderation layer. Training and release tests aim
+to reduce unjustified refusals on lawful, benign requests while keeping answers
+useful and instruction-following. This does not guarantee that every prompt
+receives an answer or that every answer is correct. The published release report
+must include the size, categories, confidence interval, and raw anonymised
+results of the refusal evaluation.
+
+## Release evaluation
+
+All results must come from the final quantized GGUF on the declared hardware
+profile. Unit tests, training-time evaluations, and unquantized checkpoints do
+not count as release scores.
+
+| Area | Incubus v1 result | Harness revision | Raw artifact |
+| --- | --- | --- | --- |
+| Coding | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Repository repair | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Tool use | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Agentic search | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Russian text | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| English text | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Lawful and benign refusal rate | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Tokens per second | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+| Peak RAM | `NOT_MEASURED` | `NOT_MEASURED` | `NOT_MEASURED` |
+
+The final card replaces every `NOT_MEASURED` value with a measured result or
+removes the corresponding claim. It links the signed benchmark manifest, raw
+outputs, commands, environment, and scoring code. No score may be copied from a
+different quantization or hardware run.
+
+## Hardware and storage
+
+- Primary download target: 5–6 GB.
+- Recommended memory: 16 GB RAM.
+- Available disk space must cover the download, installed model, and temporary
+  update copy. The final minimum is published from the measured release bundle.
+- Context size affects memory use. Start with 8,192 tokens on a 16 GB machine
+  and lower it if other applications need more memory.
+- CPU inference is supported but slower. Accelerator support depends on the
+  local runner and operating system.
+
+## Limitations
+
+- The model can produce incorrect facts, broken code, invalid tool arguments,
+  or invented citations. Execute generated code in a sandbox and review changes.
+- Agentic search quality depends on the client's search tool, source coverage,
+  and citation handling.
+- Long contexts consume more memory and may reduce answer quality.
+- Russian and English are the release languages. Other languages may be weaker
+  and are not covered by the v1 claim.
+- The model is not a substitute for professional medical, legal, financial, or
+  safety-critical review.
+- Local operation does not make a tool-enabled client harmless. Shell, browser,
+  and file permissions still need least-privilege configuration.
+- Speech recognition is a separate optional package and is not included in the
+  main GGUF download.
+
+## Reproducibility and legal files
+
+The release bundle includes exact hashes for the model, installer manifest,
+benchmark report, and legal files. Required third-party attribution and licence
+texts are inserted into `THIRD_PARTY_NOTICES` before publication. The upload is
+blocked until legal review confirms that the notices are complete and compatible
+with distribution.
+
+## Version
+
+- Product: Metaflora Incubus v1
+- Release: `${RELEASE_VERSION}`
+- GGUF quantization: `${GGUF_QUANTIZATION}`
+- Model SHA-256: `${MODEL_SHA256}`
+- Benchmark provenance SHA-256: `${BENCHMARK_PROVENANCE_SHA256}`
+- Published at: `${PUBLISHED_AT_UTC}`

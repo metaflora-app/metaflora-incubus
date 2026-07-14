@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+installer/incubusctl
+runs/
+models/
+.env
