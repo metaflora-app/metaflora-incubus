@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -343,6 +344,10 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert "--execute" in source
     assert "--require-hashes" in source
     assert "requirements/cloud-linux.lock" in source
+    revisions = re.findall(r'trusted_code_revision = "([0-9a-f]{40})"', source)
+    assert revisions == ["f485eb1d000063792f2b7101bd5c508ae770b321"]
+    assert 'git", "clone' not in source
+    assert 'rev-parse", "HEAD' in source
     assert "INCUBUS_CHECKPOINT_HMAC_KEY" in source
     assert "/Users/" not in source
     assert "build_input_repo_id=" not in source.casefold()
