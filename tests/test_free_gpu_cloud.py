@@ -393,6 +393,8 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
+    assert "shutil.rmtree(repository, ignore_errors=True)" in source
+    assert "sys.path.insert(0, source_root)" in source
     assert "requirements/cloud-linux.lock" in source
     revisions = re.findall(r'trusted_code_revision = "([0-9a-f]{40})"', source)
     assert revisions == ["32393506eedf09182afaf3328e9756db181bffff"]
