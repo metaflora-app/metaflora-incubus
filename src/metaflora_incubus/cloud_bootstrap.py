@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from metaflora_incubus.cloud_training import CloudConstraintError
 
@@ -19,6 +23,30 @@ BOOTSTRAP_ENV_NAMES = (
     "INCUBUS_DATASET_SHA256",
     "INCUBUS_PARAMETER_COUNT",
 )
+_ENCRYPTED_BOOTSTRAP_MAGIC = b"INCUBUS1"
+_ENCRYPTED_BOOTSTRAP_AAD = b"metaflora-incubus-cloud-bootstrap-v1"
+
+
+def decrypt_cloud_bootstrap(ciphertext: bytes, encoded_key: str) -> bytes:
+    """Decrypt the public opaque bootstrap with a short private Colab key."""
+    if not isinstance(ciphertext, bytes) or not ciphertext.startswith(_ENCRYPTED_BOOTSTRAP_MAGIC):
+        raise CloudConstraintError("encrypted cloud bootstrap is invalid")
+    if not isinstance(encoded_key, str) or len(encoded_key.strip()) > 128:
+        raise CloudConstraintError("cloud bootstrap key is invalid")
+    try:
+        key = base64.b64decode(encoded_key.strip(), altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise CloudConstraintError("cloud bootstrap key is not valid base64") from exc
+    if len(key) != 32:
+        raise CloudConstraintError("cloud bootstrap key must contain 32 bytes")
+    body = ciphertext[len(_ENCRYPTED_BOOTSTRAP_MAGIC) :]
+    if len(body) < 13:
+        raise CloudConstraintError("encrypted cloud bootstrap is truncated")
+    nonce, encrypted = body[:12], body[12:]
+    try:
+        return AESGCM(key).decrypt(nonce, encrypted, _ENCRYPTED_BOOTSTRAP_AAD)
+    except Exception as exc:
+        raise CloudConstraintError("cloud bootstrap key did not decrypt the payload") from exc
 
 
 def _private_atomic_write(path: Path, value: str) -> None:

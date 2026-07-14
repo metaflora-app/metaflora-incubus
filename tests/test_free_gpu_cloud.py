@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import sys
 import types
@@ -8,8 +10,9 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from metaflora_incubus.cloud_bootstrap import install_cloud_bootstrap
+from metaflora_incubus.cloud_bootstrap import decrypt_cloud_bootstrap, install_cloud_bootstrap
 from metaflora_incubus.cloud_training import (
     FIVE_GIB,
     CheckpointBackend,
@@ -48,6 +51,7 @@ from metaflora_incubus.huggingface_publication import (
 
 CONFIG_PATH = Path("configs/cloud/free-gpu-v1.json")
 NOTEBOOK_PATH = Path("notebooks/metaflora-incubus-free-gpu.ipynb")
+ENCRYPTED_BOOTSTRAP_PATH = Path("configs/cloud/bootstrap-v1.enc")
 
 
 def test_free_gpu_profile_is_honest_about_t4_and_rejects_nine_billion_parameters() -> None:
@@ -392,6 +396,9 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert 'userdata.get("INCUBUS_BOOTSTRAP")' in source
     assert "notebook access is disabled" in source
     assert 'RuntimeError("INCUBUS_BOOTSTRAP is empty")' in source
+    assert "decrypt_cloud_bootstrap(encrypted_bootstrap, encoded_bootstrap)" in source
+    assert "base64.b64decode" not in source
+    assert ENCRYPTED_BOOTSTRAP_PATH.is_file()
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
@@ -439,6 +446,22 @@ def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path
     assert "cached-access-token" in (cache / "stored_tokens").read_text()
     assert (cache / "token").stat().st_mode & 0o777 == 0o600
     assert (cache / "stored_tokens").stat().st_mode & 0o777 == 0o600
+
+
+def test_short_key_decrypts_opaque_bootstrap_and_tampering_fails() -> None:
+    key = os.urandom(32)
+    nonce = os.urandom(12)
+    payload = b'{"safe":"synthetic"}'
+    encrypted = (
+        b"INCUBUS1"
+        + nonce
+        + AESGCM(key).encrypt(nonce, payload, b"metaflora-incubus-cloud-bootstrap-v1")
+    )
+    encoded_key = base64.urlsafe_b64encode(key).decode()
+
+    assert decrypt_cloud_bootstrap(encrypted, encoded_key) == payload
+    with pytest.raises(CloudConstraintError, match="did not decrypt"):
+        decrypt_cloud_bootstrap(encrypted[:-1] + bytes([encrypted[-1] ^ 1]), encoded_key)
 
 
 @pytest.mark.parametrize("parameter_count", ("0", "7500000001", "not-an-int"))
