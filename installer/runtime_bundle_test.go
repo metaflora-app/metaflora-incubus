@@ -30,9 +30,10 @@ func TestBuildRuntimeBundleProducesCompleteWorkingArtifact(t *testing.T) {
 	}
 	digest := sha256.Sum256(serverPayload)
 	output := filepath.Join(t.TempDir(), "runtime.tar.gz")
+	license, notices := approvedLegalFiles(t)
 	command := exec.Command(
 		"sh", "build_runtime_bundle.sh", runtime.GOOS, runtime.GOARCH,
-		server, hex.EncodeToString(digest[:]), filepath.Dir(server), output,
+		server, hex.EncodeToString(digest[:]), filepath.Dir(server), output, license, notices,
 	)
 	command.Env = append(os.Environ(), "PATH="+fakeGitPath(t, pinnedRuntimeServerRevision)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if combined, err := command.CombinedOutput(); err != nil {
@@ -40,7 +41,13 @@ func TestBuildRuntimeBundleProducesCompleteWorkingArtifact(t *testing.T) {
 	}
 
 	found := inspectRuntimeArchive(t, output)
-	for _, name := range []string{"bin/incubus-runtime", "bin/llama-server", "metadata/runtime-revision"} {
+	for _, name := range []string{
+		"bin/incubus-runtime",
+		"bin/llama-server",
+		"metadata/runtime-revision",
+		"legal/LICENSE",
+		"legal/THIRD_PARTY_NOTICES",
+	} {
 		if !found[name] {
 			t.Fatalf("bundle is missing %s", name)
 		}
@@ -59,6 +66,7 @@ func TestBuildRuntimeBundleRejectsUnpinnedOrMismatchedServer(t *testing.T) {
 	}
 	digest := sha256.Sum256(serverPayload)
 	output := filepath.Join(t.TempDir(), "runtime.tar.gz")
+	license, notices := approvedLegalFiles(t)
 
 	for _, test := range []struct {
 		name     string
@@ -69,7 +77,10 @@ func TestBuildRuntimeBundleRejectsUnpinnedOrMismatchedServer(t *testing.T) {
 		{name: "wrong digest", revision: pinnedRuntimeServerRevision, digest: fmt.Sprintf("%064d", 0)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			command := exec.Command("sh", "build_runtime_bundle.sh", runtime.GOOS, runtime.GOARCH, server, test.digest, filepath.Dir(server), output)
+			command := exec.Command(
+				"sh", "build_runtime_bundle.sh", runtime.GOOS, runtime.GOARCH,
+				server, test.digest, filepath.Dir(server), output, license, notices,
+			)
 			command.Env = append(os.Environ(), "PATH="+fakeGitPath(t, test.revision)+string(os.PathListSeparator)+os.Getenv("PATH"))
 			if err := command.Run(); err == nil {
 				t.Fatal("bundle builder accepted an unverified inference server")
@@ -104,11 +115,29 @@ func TestBuildRuntimeBundleRejectsUnbundledInferenceLibraries(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := filepath.Join(t.TempDir(), "runtime.tar.gz")
-	command := exec.Command("sh", "build_runtime_bundle.sh", runtime.GOOS, runtime.GOARCH, server, hex.EncodeToString(digest[:]), filepath.Dir(server), archive)
+	license, notices := approvedLegalFiles(t)
+	command := exec.Command(
+		"sh", "build_runtime_bundle.sh", runtime.GOOS, runtime.GOARCH,
+		server, hex.EncodeToString(digest[:]), filepath.Dir(server), archive, license, notices,
+	)
 	command.Env = append(os.Environ(), "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if combined, err := command.CombinedOutput(); err == nil {
 		t.Fatalf("bundle builder accepted dynamic inference libraries: %s", combined)
 	}
+}
+
+func approvedLegalFiles(t *testing.T) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	license := filepath.Join(directory, "LICENSE")
+	notices := filepath.Join(directory, "THIRD_PARTY_NOTICES")
+	if err := os.WriteFile(license, []byte("approved distribution license\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notices, []byte("approved third-party notices\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return license, notices
 }
 
 func fakeGitPath(t *testing.T, revision string) string {

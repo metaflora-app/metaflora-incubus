@@ -28,6 +28,7 @@ review, and benchmark report pass the v1 release gates. Values marked
 | File | Purpose | SHA-256 |
 | --- | --- | --- |
 | `metaflora-incubus-v1.gguf` | Main local model | `${MODEL_SHA256}` |
+| `LICENSE` | Distribution licence | `${LICENSE_SHA256}` |
 | `SHA256SUMS` | Checksums for the release bundle | `${CHECKSUMS_SHA256}` |
 | `THIRD_PARTY_NOTICES` | Required licences and attribution | `${NOTICES_SHA256}` |
 
@@ -46,11 +47,9 @@ macOS and Linux:
 curl -fsSL https://metaflora.ai/incubus/install | sh
 ```
 
-Windows PowerShell:
-
-```powershell
-irm https://metaflora.ai/incubus/install.ps1 | iex
-```
+Windows automatic installation is not included in v1. The v1 installer
+supports macOS and Linux; Windows support will be documented only after a
+signed Windows runtime and installer pass the same release gates.
 
 After installation, select `Metaflora Incubus v1` in OpenCode. The installer
 manages the local endpoint and its client entry. No API key is required for the

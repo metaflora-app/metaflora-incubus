@@ -266,6 +266,15 @@ func TestValidateStagedRuntimeRequiresBundledInferenceServer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "llama-server"), []byte("server"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	legal := filepath.Join(staging, "legal")
+	if err := os.MkdirAll(legal, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"LICENSE", "THIRD_PARTY_NOTICES"} {
+		if err := os.WriteFile(filepath.Join(legal, name), []byte("reviewed legal text"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := validateStagedRuntime(staging, "darwin"); err != nil {
 		t.Fatalf("validateStagedRuntime() error = %v", err)
 	}

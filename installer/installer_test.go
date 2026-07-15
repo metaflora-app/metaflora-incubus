@@ -48,7 +48,8 @@ func artifactJSON(id, osName, arch, url, digest string, size, minimumRAM uint64)
   ,"format": "tar.gz",
   "role": "runtime",
   "revision": "0123456789abcdef0123456789abcdef01234567",
-  "unpacked_size_bytes": 1048576
+  "unpacked_size_bytes": 1048576,
+  "legal_files": ["legal/LICENSE", "legal/THIRD_PARTY_NOTICES"]
 }`
 }
 
@@ -102,6 +103,35 @@ func TestParseAndVerifyManifestAcceptsValidSignature(t *testing.T) {
 	}
 	if len(manifest.Artifacts) != 2 {
 		t.Fatalf("len(Artifacts) = %d, want 2", len(manifest.Artifacts))
+	}
+}
+
+func TestParseAndVerifyManifestRejectsRuntimeWithoutDeclaredLegalFiles(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	runtimeJSON := strings.Replace(
+		artifactJSON(
+			"macos-arm64-q5",
+			"darwin",
+			"arm64",
+			"https://downloads.metaflora.ai/incubus/v1/macos-arm64.tar.zst",
+			digest,
+			5*giB,
+			12*giB,
+		),
+		`,
+  "legal_files": ["legal/LICENSE", "legal/THIRD_PARTY_NOTICES"]`,
+		"",
+		1,
+	)
+	payload, signature, publicKey := signedManifest(
+		t,
+		releaseManifestJSON(
+			runtimeJSON+","+modelArtifactJSON(strings.Repeat("e", 64), 3*giB, 12*giB),
+		),
+	)
+
+	if _, err := ParseAndVerifyManifest(payload, signature, publicKey); err == nil {
+		t.Fatal("ParseAndVerifyManifest() accepted a runtime without legal files")
 	}
 }
 
@@ -352,6 +382,9 @@ func TestRenderOllamaModelfileUsesInstalledGGUF(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(rendered), "api_key") {
 		t.Fatal("local Ollama profile must not contain an API key")
+	}
+	if !strings.Contains(rendered, "PARAMETER num_ctx 8192") {
+		t.Fatalf("Ollama context drifted from the measured release profile: %s", rendered)
 	}
 }
 

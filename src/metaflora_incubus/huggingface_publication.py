@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 from metaflora_incubus.benchmark_evidence import (
@@ -84,10 +85,12 @@ class Uploader(Protocol):
     def upload_folder(self, **kwargs: object) -> object: ...
 
     def verify_uploaded_snapshot(
-        self, *, repo_id: str, snapshot: tuple[tuple[str, int, str], ...]
+        self, *, repo_id: str, revision: str, snapshot: tuple[tuple[str, int, str], ...]
     ) -> bool: ...
 
-    def make_public(self, *, repo_id: str) -> object: ...
+    def current_revision(self, *, repo_id: str) -> str: ...
+
+    def make_public(self, *, repo_id: str, expected_revision: str) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -134,6 +137,8 @@ class PublicationResult:
     repo_id: str
     decision: PublicationDecision
     remote_result: object | None = None
+    revision: str | None = None
+    installer_metadata: Mapping[str, str | int] | None = None
 
 
 def evaluate_publication_bundle(
@@ -187,7 +192,7 @@ def evaluate_publication_bundle(
         blockers,
     )
     _verify_signature("smoke_test", bundle, "smoke-test.json", signature_verifier, blockers)
-    _check_manifest(release_manifest, artifact_sha, model_size, blockers)
+    _check_manifest(bundle, release_manifest, artifact_sha, model_size, blockers)
     _check_benchmark_links(bundle, artifact_sha, report, provenance, decision, blockers)
     _check_benchmark_evidence(bundle, report, provenance, blockers)
     _check_release_gate(report, blockers)
@@ -230,16 +235,54 @@ def publish_to_huggingface(
         folder_path=str(bundle),
         commit_message="Publish Metaflora Incubus v1",
     )
+    revision = _upload_revision(remote)
+    if revision is None:
+        blocker = PublicationBlocker("remote_revision_invalid", policy.repo_id)
+        failed = PublicationDecision(False, (*decision.blockers, blocker))
+        return PublicationResult(False, policy.repo_id, failed, remote)
     try:
-        verified = uploader.verify_uploaded_snapshot(repo_id=policy.repo_id, snapshot=snapshot)
+        verified = uploader.verify_uploaded_snapshot(
+            repo_id=policy.repo_id,
+            revision=revision,
+            snapshot=snapshot,
+        )
     except Exception:
         verified = False
     if not verified:
         blocker = PublicationBlocker("remote_snapshot_unverified", policy.repo_id)
         failed = PublicationDecision(False, (*decision.blockers, blocker))
-        return PublicationResult(False, policy.repo_id, failed, remote)
-    uploader.make_public(repo_id=policy.repo_id)
-    return PublicationResult(True, policy.repo_id, decision, remote)
+        return PublicationResult(False, policy.repo_id, failed, remote, revision)
+    try:
+        head_revision = uploader.current_revision(repo_id=policy.repo_id)
+    except Exception:
+        head_revision = ""
+    if head_revision != revision:
+        blocker = PublicationBlocker("remote_head_changed", policy.repo_id)
+        failed = PublicationDecision(False, (*decision.blockers, blocker))
+        return PublicationResult(False, policy.repo_id, failed, remote, revision)
+    try:
+        uploader.make_public(repo_id=policy.repo_id, expected_revision=revision)
+    except Exception:
+        blocker = PublicationBlocker("make_public_failed", policy.repo_id)
+        failed = PublicationDecision(False, (*decision.blockers, blocker))
+        return PublicationResult(False, policy.repo_id, failed, remote, revision)
+    model_entry = next(item for item in snapshot if item[0] == MODEL_NAME)
+    installer_metadata: Mapping[str, str | int] = MappingProxyType(
+        {
+            "revision": revision,
+            "url": f"https://huggingface.co/{policy.repo_id}/resolve/{revision}/{MODEL_NAME}",
+            "sha256": model_entry[2],
+            "size_bytes": model_entry[1],
+        }
+    )
+    return PublicationResult(
+        True,
+        policy.repo_id,
+        decision,
+        remote,
+        revision,
+        installer_metadata,
+    )
 
 
 class HuggingFaceHubUploader:
@@ -265,11 +308,17 @@ class HuggingFaceHubUploader:
         return self._api.upload_folder(**kwargs)
 
     def verify_uploaded_snapshot(
-        self, *, repo_id: str, snapshot: tuple[tuple[str, int, str], ...]
+        self, *, repo_id: str, revision: str, snapshot: tuple[tuple[str, int, str], ...]
     ) -> bool:
         from huggingface_hub import hf_hub_download
 
-        remote_files = set(self._api.list_repo_files(repo_id=repo_id, repo_type="model"))
+        remote_files = set(
+            self._api.list_repo_files(
+                repo_id=repo_id,
+                repo_type="model",
+                revision=revision,
+            )
+        )
         expected_files = {name for name, _size, _digest in snapshot}
         if remote_files - {".gitattributes"} != expected_files:
             return False
@@ -279,6 +328,7 @@ class HuggingFaceHubUploader:
                     repo_id=repo_id,
                     filename=name,
                     repo_type="model",
+                    revision=revision,
                     token=self._token,
                     force_download=True,
                 )
@@ -287,7 +337,13 @@ class HuggingFaceHubUploader:
                 return False
         return True
 
-    def make_public(self, *, repo_id: str) -> object:
+    def current_revision(self, *, repo_id: str) -> str:
+        revision = getattr(self._api.model_info(repo_id=repo_id, revision="main"), "sha", None)
+        return revision if isinstance(revision, str) else ""
+
+    def make_public(self, *, repo_id: str, expected_revision: str) -> object:
+        if self.current_revision(repo_id=repo_id) != expected_revision:
+            raise RuntimeError("repository HEAD changed before make-public")
         return self._api.update_repo_settings(repo_id=repo_id, repo_type="model", private=False)
 
 
@@ -338,8 +394,7 @@ def _check_bound_gate_reports(
             or count <= 0
             or not seeds
             or any(
-                not isinstance(seed, int) or isinstance(seed, bool) or seed < 0
-                for seed in seeds
+                not isinstance(seed, int) or isinstance(seed, bool) or seed < 0 for seed in seeds
             )
         ):
             raise ValueError("invalid evidence binding counts")
@@ -419,11 +474,32 @@ def _bundle_snapshot(bundle: Path) -> tuple[tuple[str, int, str], ...]:
     )
 
 
+def _upload_revision(remote_result: object) -> str | None:
+    candidate: object
+    if isinstance(remote_result, dict):
+        candidate = remote_result.get("oid")
+    else:
+        candidate = getattr(remote_result, "oid", None)
+    if not isinstance(candidate, str) or re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+        return None
+    return candidate
+
+
 def _check_checksums(bundle: Path, artifact_sha: str, blockers: list[PublicationBlocker]) -> None:
-    expected = f"{artifact_sha}  {MODEL_NAME}"
-    lines = (bundle / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
-    if expected not in lines:
-        blockers.append(PublicationBlocker("checksum_mismatch", MODEL_NAME))
+    names = (MODEL_NAME, "LICENSE", "THIRD_PARTY_NOTICES")
+    expected = {
+        name: artifact_sha if name == MODEL_NAME else _sha256_file(bundle / name) for name in names
+    }
+    parsed: dict[str, str] = {}
+    malformed = False
+    for line in (bundle / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        parts = line.split("  ", 1)
+        if len(parts) != 2 or parts[1] in parsed:
+            malformed = True
+            continue
+        parsed[parts[1]] = parts[0]
+    if malformed or parsed != expected:
+        blockers.append(PublicationBlocker("checksum_mismatch", "SHA256SUMS"))
 
 
 def _load_json(path: Path, blockers: list[PublicationBlocker]) -> dict[str, object]:
@@ -456,21 +532,35 @@ def _verify_signature(
 
 
 def _check_manifest(
+    bundle: Path,
     manifest: dict[str, object],
     artifact_sha: str,
     model_size: int,
     blockers: list[PublicationBlocker],
 ) -> None:
     artifacts = manifest.get("artifacts")
+    expected_artifacts: list[dict[str, object]] = [
+        {
+            "path": MODEL_NAME,
+            "gguf_quantization": "Q5_K_M",
+            "sha256": artifact_sha,
+            "size_bytes": model_size,
+        },
+        *[
+            {
+                "path": name,
+                "sha256": _sha256_file(bundle / name),
+                "size_bytes": (bundle / name).stat().st_size,
+            }
+            for name in ("LICENSE", "THIRD_PARTY_NOTICES")
+        ],
+    ]
     valid = (
         manifest.get("release_id") == "incubus-v1"
         and isinstance(artifacts, list)
-        and len(artifacts) == 1
-        and isinstance(artifacts[0], dict)
-        and artifacts[0].get("path") == MODEL_NAME
-        and artifacts[0].get("gguf_quantization") == "Q5_K_M"
-        and artifacts[0].get("sha256") == artifact_sha
-        and artifacts[0].get("size_bytes") == model_size
+        and len(artifacts) == 3
+        and all(isinstance(artifact, dict) for artifact in artifacts)
+        and artifacts == expected_artifacts
     )
     if not valid:
         blockers.append(PublicationBlocker("manifest_invalid", "release-manifest.json"))
@@ -616,6 +706,8 @@ def _scan_public_surfaces(
         if not path.is_file():
             continue
         relative_name = str(path.relative_to(bundle))
+        if relative_name in {"LICENSE", "THIRD_PARTY_NOTICES"}:
+            continue
         if _contains_pinned_fingerprint(path):
             blockers.append(PublicationBlocker("prohibited_identifier", relative_name))
             continue
@@ -683,9 +775,7 @@ def _contains_pinned_fingerprint(path: Path) -> bool:
     for chunk in _public_surface_chunks(path):
         normalized = "".join(chr(byte + 32) if 65 <= byte <= 90 else chr(byte) for byte in chunk)
         normalized = "".join(
-            character
-            for character in normalized
-            if character.isascii() and character.isalnum()
+            character for character in normalized if character.isascii() and character.isalnum()
         )
         combined = tail + normalized
         for length, expected in windows.items():

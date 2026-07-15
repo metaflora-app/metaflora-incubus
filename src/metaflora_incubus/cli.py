@@ -247,6 +247,12 @@ def _publish_hf(args: argparse.Namespace) -> int:
                 {
                     "repo_id": result.repo_id,
                     "uploaded": result.uploaded,
+                    "revision": result.revision,
+                    "installer_metadata": (
+                        dict(result.installer_metadata)
+                        if result.installer_metadata is not None
+                        else None
+                    ),
                     "blockers": [blocker.__dict__ for blocker in result.decision.blockers],
                 },
                 indent=2,

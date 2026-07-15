@@ -99,9 +99,7 @@ def bound_evidence(
         elif passing:
             score = 1.0
             content = " ".join(case["required_terms"]) or "measured response"
-            raw_response = {
-                "choices": [{"finish_reason": "stop", "message": {"content": content}}]
-            }
+            raw_response = {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
         raw.append(
             {
                 "artifact_sha256": artifact_sha,
@@ -163,9 +161,7 @@ def release_inputs(tmp_path: Path, *, deployable_passing: bool = True) -> Releas
         model_path=model,
         evidence_dir=deployable.evidence_dir,
         output_dir=tmp_path / "bundle",
-        full_precision_report=bound_evidence(
-            tmp_path / "full-evidence", full, "candidate-full"
-        ),
+        full_precision_report=bound_evidence(tmp_path / "full-evidence", full, "candidate-full"),
         baselines={
             "reference": bound_evidence(
                 tmp_path / "reference-evidence",
@@ -230,6 +226,15 @@ def test_builds_a_complete_release_gated_hugging_face_bundle(tmp_path: Path) -> 
     card = (inputs.output_dir / "README.md").read_text(encoding="utf-8")
     assert "1.000000" in card
     assert "private-source-name" not in card
+    manifest = json.loads((inputs.output_dir / "release-manifest.json").read_text())
+    artifacts = {artifact["path"]: artifact for artifact in manifest["artifacts"]}
+    assert set(artifacts) == {MODEL_NAME, "LICENSE", "THIRD_PARTY_NOTICES"}
+    for name in artifacts:
+        payload = (inputs.output_dir / name).read_bytes()
+        assert artifacts[name]["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert artifacts[name]["size_bytes"] == len(payload)
+    checksums = (inputs.output_dir / "SHA256SUMS").read_text().splitlines()
+    assert {line.split("  ", 1)[1] for line in checksums} == set(artifacts)
 
 
 def test_rejects_runner_revision_not_approved_by_release_inputs(tmp_path: Path) -> None:

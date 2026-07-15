@@ -109,6 +109,7 @@ func newFakeReleaseVersion(t *testing.T, version string, faults releaseFaults) f
 			"role":                "runtime",
 			"revision":            "0123456789abcdef0123456789abcdef01234567",
 			"unpacked_size_bytes": 4096,
+			"legal_files":         []string{"legal/LICENSE", "legal/THIRD_PARTY_NOTICES"},
 		}, {
 			"id":                "test-model-q5",
 			"os":                "any",
@@ -161,6 +162,7 @@ func testBundleVariant(t *testing.T, includeRuntime bool) []byte {
 	gzipWriter := gzip.NewWriter(&archive)
 	tarWriter := tar.NewWriter(gzipWriter)
 	files := map[string]string{
+		"legal/LICENSE":             "approved distribution license",
 		"legal/THIRD_PARTY_NOTICES": "required legal notices",
 	}
 	if includeRuntime {

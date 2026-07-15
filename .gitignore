@@ -12,3 +12,5 @@ installer/incubusctl
 runs/
 models/
 .env
+*.release-key
+*.private-key

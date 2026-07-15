@@ -13,8 +13,8 @@ The final Hugging Face repository contains:
 | `README.md` | Rendered model card with no template tokens |
 | `metaflora-incubus-v1.gguf` | Final release-gated GGUF artifact |
 | `Modelfile` | Ollama import recipe for the local GGUF |
-| `SHA256SUMS` | Checksums generated from the exact uploaded bytes |
-| `release-manifest.json` | Release ID, model path, size, and SHA-256 |
+| `SHA256SUMS` | Exact checksums for the model, `LICENSE`, and `THIRD_PARTY_NOTICES` |
+| `release-manifest.json` | Signed inventory with path, size, and SHA-256 for the model and both legal files |
 | `release-manifest.sig` | Detached signature for the release manifest |
 | `benchmark-report.json` | Measured results from the final GGUF |
 | `benchmark-provenance.json` | Harness, commands, hardware, dataset revisions |
@@ -45,8 +45,8 @@ replaces each
 3. The release decision is `pass` and references the same model hash.
 4. Every benchmark row comes from the final quantized artifact.
 5. `README.md` contains neither `${...}` nor `NOT_MEASURED`.
-6. `THIRD_PARTY_NOTICES` contains no legal-review marker and passes licence
-   review.
+6. `LICENSE` and `THIRD_PARTY_NOTICES` contain no legal-review marker, pass
+   licence review, and match both the signed manifest and `SHA256SUMS`.
 7. The staged bundle contains no credentials, access tokens, private paths, or
    undeclared executable files.
 8. A fresh Ollama import, llama.cpp launch, OpenAI-compatible API request, and
@@ -64,10 +64,12 @@ page with guessed scores, an unverified model file, or incomplete legal notices.
 5. Validate all hashes and run clean client smoke tests.
 6. Create or update the Hugging Face model repository as a draft or private
    repository.
-7. Upload immutable artifacts, read them back, and verify their hashes.
-8. Make the repository public only after the downloaded GGUF passes the same
-   smoke tests.
-9. Put the verified model URL and revision into the signed installer manifest.
+7. Capture the exact 40-hex commit returned by the upload, then read every file
+   back at that immutable revision and verify its size and SHA-256.
+8. Recheck that repository HEAD still equals the verified commit immediately
+   before making the repository public; any drift aborts publication.
+9. Put the verified revision and its revision-pinned model URL into the
+   publication receipt and signed installer manifest.
 
 The public URL is recorded only after read-back verification. Until then,
 documentation must state that no public checkpoint exists.
@@ -84,3 +86,6 @@ The same GGUF artifact supports four entry paths:
 
 Client-specific packaging must never alter the model bytes without producing a
 new filename, checksum, benchmark result, and release manifest.
+
+Windows automatic installation is not included in v1. The public model card
+must not advertise a Windows bootstrap until a signed Windows runtime exists.

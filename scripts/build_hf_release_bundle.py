@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from metaflora_incubus.gguf_benchmark_runner import PRODUCTION_ATTESTATION_PUBLIC_KEY
@@ -19,6 +18,7 @@ from metaflora_incubus.release_bundle import (
     ReleaseBundleInputs,
     build_release_bundle,
 )
+from metaflora_incubus.release_signing import load_release_private_key
 
 
 def main() -> int:
@@ -36,8 +36,9 @@ def main() -> int:
     args = parser.parse_args()
 
     reports = _json_object(args.reports)
-    private_key = Ed25519PrivateKey.from_private_bytes(
-        base64.b64decode(args.private_key.read_text(encoding="ascii").strip(), validate=True)
+    private_key = load_release_private_key(
+        args.private_key,
+        repository_root=Path(__file__).resolve().parents[1],
     )
     public_key = private_key.public_key()
     actual_public = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -76,8 +77,7 @@ def main() -> int:
             _object(reports.get("full_precision_report"), "full_precision_report")
         ),
         baselines={
-            name: _bound_report(_object(value, name))
-            for name, value in baselines_document.items()
+            name: _bound_report(_object(value, name)) for name, value in baselines_document.items()
         },
         runtime_id=args.runtime,
         harness_revision=args.harness_revision,

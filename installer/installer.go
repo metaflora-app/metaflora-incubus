@@ -30,19 +30,22 @@ type Manifest struct {
 }
 
 type Artifact struct {
-	ID                string `json:"id"`
-	OS                string `json:"os"`
-	Arch              string `json:"arch"`
-	URL               string `json:"url"`
-	SHA256            string `json:"sha256"`
-	SizeBytes         uint64 `json:"size_bytes"`
-	MinimumRAMBytes   uint64 `json:"minimum_ram_bytes"`
-	Signature         string `json:"signature"`
-	Format            string `json:"format"`
-	Role              string `json:"role"`
-	Revision          string `json:"revision"`
-	UnpackedSizeBytes uint64 `json:"unpacked_size_bytes,omitempty"`
+	ID                string   `json:"id"`
+	OS                string   `json:"os"`
+	Arch              string   `json:"arch"`
+	URL               string   `json:"url"`
+	SHA256            string   `json:"sha256"`
+	SizeBytes         uint64   `json:"size_bytes"`
+	MinimumRAMBytes   uint64   `json:"minimum_ram_bytes"`
+	Signature         string   `json:"signature"`
+	Format            string   `json:"format"`
+	Role              string   `json:"role"`
+	Revision          string   `json:"revision"`
+	UnpackedSizeBytes uint64   `json:"unpacked_size_bytes,omitempty"`
+	LegalFiles        []string `json:"legal_files,omitempty"`
 }
+
+var requiredRuntimeLegalFiles = []string{"legal/LICENSE", "legal/THIRD_PARTY_NOTICES"}
 
 type ReleaseArtifacts struct {
 	Runtime       Artifact
@@ -106,12 +109,12 @@ func ParseAndVerifyManifest(payload, signature []byte, publicKey ed25519.PublicK
 		switch artifact.Role {
 		case ArtifactRoleModel:
 			modelCount++
-			if artifact.Format != "gguf" || artifact.UnpackedSizeBytes != 0 {
+			if artifact.Format != "gguf" || artifact.UnpackedSizeBytes != 0 || len(artifact.LegalFiles) != 0 {
 				return Manifest{}, errors.New("model artifact must be a direct GGUF download")
 			}
 		case ArtifactRoleRuntime:
 			runtimeCount++
-			if artifact.Format != "tar.gz" || artifact.UnpackedSizeBytes == 0 {
+			if artifact.Format != "tar.gz" || artifact.UnpackedSizeBytes == 0 || !equalStrings(artifact.LegalFiles, requiredRuntimeLegalFiles) {
 				return Manifest{}, errors.New("runtime artifact must declare its unpacked size")
 			}
 		default:
@@ -126,6 +129,18 @@ func ParseAndVerifyManifest(payload, signature []byte, publicKey ed25519.PublicK
 		return Manifest{}, errors.New("manifest must contain one model and at least one runtime")
 	}
 	return manifest, nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func SelectReleaseArtifacts(manifest Manifest, platform Platform, resources Resources) (ReleaseArtifacts, error) {
@@ -262,5 +277,5 @@ func RenderOllamaModelfile(modelPath string) ([]byte, error) {
 		return nil, errors.New("GGUF path must be absolute and contain no newlines")
 	}
 	quoted := strings.ReplaceAll(modelPath, `"`, `\"`)
-	return []byte(fmt.Sprintf("FROM \"%s\"\nPARAMETER num_ctx 32768\n", quoted)), nil
+	return []byte(fmt.Sprintf("FROM \"%s\"\nPARAMETER num_ctx 8192\n", quoted)), nil
 }

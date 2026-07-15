@@ -3,8 +3,8 @@ set -eu
 
 pinned_runtime_revision='bf2c86ddc0685f580595954056c2e77ebabfab4f'
 
-if [ "$#" -ne 6 ]; then
-  printf '%s\n' 'usage: build_runtime_bundle.sh darwin|linux arm64|amd64 /path/to/llama-server expected-sha256 /path/to/source-checkout /path/to/runtime.tar.gz' >&2
+if [ "$#" -ne 8 ]; then
+  printf '%s\n' 'usage: build_runtime_bundle.sh darwin|linux arm64|amd64 /path/to/llama-server expected-sha256 /path/to/source-checkout /path/to/runtime.tar.gz /path/to/LICENSE /path/to/THIRD_PARTY_NOTICES' >&2
   exit 2
 fi
 
@@ -14,6 +14,8 @@ server="$3"
 expected_sha256="$4"
 source_checkout="$5"
 output="$6"
+license="$7"
+notices="$8"
 
 case "$target_os" in
   darwin|linux) ;;
@@ -38,6 +40,12 @@ if [ ! -d "$source_checkout" ] || [ -L "$source_checkout" ]; then
   printf '%s\n' 'runtime source checkout is missing or unsafe' >&2
   exit 2
 fi
+for legal_file in "$license" "$notices"; do
+  if [ ! -f "$legal_file" ] || [ -L "$legal_file" ] || [ ! -s "$legal_file" ]; then
+    printf '%s\n' 'legal inputs must be non-empty regular files, not symlinks' >&2
+    exit 2
+  fi
+done
 command -v git >/dev/null 2>&1 || { printf '%s\n' 'git is required to verify runtime provenance' >&2; exit 2; }
 source_checkout=$(CDPATH= cd -- "$source_checkout" && pwd -P)
 server_directory=$(CDPATH= cd -- "$(dirname -- "$server")" && pwd -P)
@@ -89,7 +97,7 @@ mkdir -p "$output_dir"
 output=$(CDPATH= cd -- "$output_dir" && pwd)/$(basename -- "$output")
 staging=$(mktemp -d "${TMPDIR:-/tmp}/incubus-runtime.XXXXXX")
 trap 'rm -rf "$staging" "$dependencies"' EXIT HUP INT TERM
-mkdir -p "$staging/bin" "$staging/metadata"
+mkdir -p "$staging/bin" "$staging/metadata" "$staging/legal"
 
 (
   cd "$script_dir"
@@ -100,9 +108,12 @@ cp "$server" "$staging/bin/llama-server"
 chmod 700 "$staging/bin/incubus-runtime" "$staging/bin/llama-server"
 printf '%s\n' "$pinned_runtime_revision" > "$staging/metadata/runtime-revision"
 chmod 600 "$staging/metadata/runtime-revision"
+cp "$license" "$staging/legal/LICENSE"
+cp "$notices" "$staging/legal/THIRD_PARTY_NOTICES"
+chmod 600 "$staging/legal/LICENSE" "$staging/legal/THIRD_PARTY_NOTICES"
 "$staging/bin/llama-server" --version >/dev/null
 
 temporary="$output.tmp.$$"
 rm -f "$temporary"
-tar -czf "$temporary" -C "$staging" bin metadata
+tar -czf "$temporary" -C "$staging" bin metadata legal
 mv "$temporary" "$output"

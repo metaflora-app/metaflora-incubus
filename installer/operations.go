@@ -207,6 +207,13 @@ func validateStagedRuntime(staging, osName string) error {
 			return fmt.Errorf("runtime artifact executable %q has unsafe permissions", name)
 		}
 	}
+	for _, name := range requiredRuntimeLegalFiles {
+		path := filepath.Join(staging, filepath.FromSlash(name))
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() == 0 {
+			return fmt.Errorf("runtime artifact does not contain the required legal file %q", name)
+		}
+	}
 	return nil
 }
 

@@ -157,6 +157,14 @@ def _render_bundle(
         shutil.copy2(inputs.model_path, model_target)
     shutil.copy2(inputs.license_path, stage / "LICENSE")
     shutil.copy2(inputs.notices_path, stage / "THIRD_PARTY_NOTICES")
+    legal_artifacts = [
+        {
+            "path": name,
+            "sha256": _sha256_file(stage / name),
+            "size_bytes": (stage / name).stat().st_size,
+        }
+        for name in ("LICENSE", "THIRD_PARTY_NOTICES")
+    ]
     shutil.copy2(inputs.evidence_dir / "benchmark-cases.jsonl", stage / "benchmark-cases.jsonl")
     shutil.copy2(inputs.evidence_dir / "benchmark-raw.jsonl", stage / "benchmark-raw.jsonl")
     shutil.copy2(
@@ -177,7 +185,8 @@ def _render_bundle(
                 "gguf_quantization": "Q5_K_M",
                 "sha256": artifact_sha,
                 "size_bytes": model_target.stat().st_size,
-            }
+            },
+            *legal_artifacts,
         ],
     }
     report = {
@@ -233,7 +242,14 @@ def _render_bundle(
         "response": smoke_response,
     }
     _write_signed_json(stage, "smoke-test", smoke, "smoke_test", signer)
-    (stage / "SHA256SUMS").write_text(f"{artifact_sha}  {MODEL_NAME}\n", encoding="utf-8")
+    checksum_artifacts = [
+        {"path": MODEL_NAME, "sha256": artifact_sha},
+        *legal_artifacts,
+    ]
+    (stage / "SHA256SUMS").write_text(
+        "".join(f"{item['sha256']}  {item['path']}\n" for item in checksum_artifacts),
+        encoding="utf-8",
+    )
     (stage / "Modelfile").write_text(
         f"FROM ./{MODEL_NAME}\nPARAMETER num_ctx 8192\n", encoding="utf-8"
     )
@@ -308,10 +324,7 @@ def _report_document(
 
 
 def _attested_smoke(evidence_dir: Path) -> tuple[str, str, str]:
-    cases = {
-        row["case_id"]: row
-        for row in _read_jsonl(evidence_dir / "benchmark-cases.jsonl")
-    }
+    cases = {row["case_id"]: row for row in _read_jsonl(evidence_dir / "benchmark-cases.jsonl")}
     for row in _read_jsonl(evidence_dir / "benchmark-raw.jsonl"):
         response = row.get("response")
         case_id = row.get("case_id")

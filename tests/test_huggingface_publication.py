@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,13 +88,25 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
         "# Metaflora Incubus v1\n\nA compact local model for code, tools and text.\n",
         encoding="utf-8",
     )
-    (root / "LICENSE").write_text("Apache License 2.0\n", encoding="utf-8")
+    license_payload = b"Apache License 2.0\n"
+    (root / "LICENSE").write_bytes(license_payload)
     # Legal attribution is mandatory and is not a product/model-card naming surface.
-    (root / "THIRD_PARTY_NOTICES").write_text(
-        "Approved third-party notices.\n",
+    notices_payload = b"Approved third-party notices.\n"
+    (root / "THIRD_PARTY_NOTICES").write_bytes(notices_payload)
+    legal_payloads = {
+        "LICENSE": license_payload,
+        "THIRD_PARTY_NOTICES": notices_payload,
+    }
+    (root / "SHA256SUMS").write_text(
+        "".join(
+            f"{digest}  {name}\n"
+            for name, digest in (
+                (MODEL_NAME, artifact_sha),
+                *((name, sha256_bytes(payload)) for name, payload in legal_payloads.items()),
+            )
+        ),
         encoding="utf-8",
     )
-    (root / "SHA256SUMS").write_text(f"{artifact_sha}  {MODEL_NAME}\n", encoding="utf-8")
     (root / "Modelfile").write_text(f"FROM ./{MODEL_NAME}\n", encoding="utf-8")
 
     write_json(
@@ -107,7 +120,15 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
                     "gguf_quantization": "Q5_K_M",
                     "sha256": artifact_sha,
                     "size_bytes": len(model_bytes),
-                }
+                },
+                *[
+                    {
+                        "path": name,
+                        "sha256": sha256_bytes(payload),
+                        "size_bytes": len(payload),
+                    }
+                    for name, payload in legal_payloads.items()
+                ],
             ],
         },
     )
@@ -143,9 +164,7 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             }
         else:
             content = " ".join(case["required_terms"]) or "measured response"
-            raw_response = {
-                "choices": [{"finish_reason": "stop", "message": {"content": content}}]
-            }
+            raw_response = {"choices": [{"finish_reason": "stop", "message": {"content": content}}]}
         raw_rows.append(
             {
                 "artifact_sha256": artifact_sha,
@@ -294,6 +313,21 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
     }
 
 
+def refresh_legal_integrity(root: Path) -> None:
+    manifest_path = root / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = {artifact["path"]: artifact for artifact in manifest["artifacts"]}
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES"):
+        payload = (root / name).read_bytes()
+        artifacts[name]["sha256"] = sha256_bytes(payload)
+        artifacts[name]["size_bytes"] = len(payload)
+    write_json(manifest_path, manifest)
+    (root / "SHA256SUMS").write_text(
+        "".join(f"{artifact['sha256']}  {name}\n" for name, artifact in artifacts.items()),
+        encoding="utf-8",
+    )
+
+
 def policy(*, repo_id: str = DEFAULT_REPO_ID):
     publications = publication_module()
     return publications.PublicationPolicy(
@@ -314,12 +348,16 @@ class RecordingVerifier:
 
 
 class RecordingUploader:
-    def __init__(self, *, remote_verified: bool = True) -> None:
+    revision = "0123456789abcdef0123456789abcdef01234567"
+
+    def __init__(self, *, remote_verified: bool = True, head_revision: str | None = None) -> None:
         self.calls: list[dict[str, object]] = []
         self.verification_calls: list[dict[str, object]] = []
         self.private_calls: list[dict[str, object]] = []
         self.public_calls: list[dict[str, object]] = []
+        self.head_calls: list[dict[str, object]] = []
         self.remote_verified = remote_verified
+        self.head_revision = head_revision or self.revision
 
     def ensure_private_repo(self, **kwargs: object) -> dict[str, bool]:
         self.private_calls.append(kwargs)
@@ -327,11 +365,15 @@ class RecordingUploader:
 
     def upload_folder(self, **kwargs: object) -> dict[str, str]:
         self.calls.append(kwargs)
-        return {"commit_url": "https://huggingface.co/example/commit/abc"}
+        return {"oid": self.revision}
 
     def verify_uploaded_snapshot(self, **kwargs: object) -> bool:
         self.verification_calls.append(kwargs)
         return self.remote_verified
+
+    def current_revision(self, **kwargs: object) -> str:
+        self.head_calls.append(kwargs)
+        return self.head_revision
 
     def make_public(self, **kwargs: object) -> dict[str, bool]:
         self.public_calls.append(kwargs)
@@ -663,8 +705,6 @@ def test_smoke_transcript_must_show_a_real_pass_for_the_exact_gguf(
         "README.md",
         "benchmark-report.json",
         "smoke-test.json",
-        "LICENSE",
-        "THIRD_PARTY_NOTICES",
     ),
 )
 @pytest.mark.parametrize("identifier", ("forbidden-source", "FORBIDDEN-TEACHER"))
@@ -682,6 +722,23 @@ def test_product_facing_files_are_brand_only(tmp_path: Path, surface: str, ident
 
     assert decision.approved is False
     assert "prohibited_identifier" in blocker_codes(decision)
+
+
+@pytest.mark.parametrize("surface", ("LICENSE", "THIRD_PARTY_NOTICES"))
+def test_reviewed_legal_files_may_retain_required_attribution(tmp_path: Path, surface: str) -> None:
+    publications = publication_module()
+    build_valid_bundle(tmp_path)
+    path = tmp_path / surface
+    path.write_text(path.read_text(encoding="utf-8") + "forbidden-source", encoding="utf-8")
+    refresh_legal_integrity(tmp_path)
+
+    decision = publications.evaluate_publication_bundle(
+        tmp_path,
+        policy=policy(),
+        signature_verifier=RecordingVerifier(),
+    )
+
+    assert "prohibited_identifier" not in blocker_codes(decision)
 
 
 def test_gguf_printable_metadata_is_included_in_redaction_gate(tmp_path: Path) -> None:
@@ -790,7 +847,7 @@ def test_secret_material_anywhere_in_public_text_blocks_upload(tmp_path: Path, s
 
 def test_uploader_is_injected_and_receives_configured_repository_once(tmp_path: Path) -> None:
     publications = publication_module()
-    build_valid_bundle(tmp_path)
+    bundle_metadata = build_valid_bundle(tmp_path)
     uploader = RecordingUploader()
     target = "metaflora-app/incubus-release-candidate"
 
@@ -809,8 +866,21 @@ def test_uploader_is_injected_and_receives_configured_repository_once(tmp_path: 
     assert "token" not in uploader.calls[0]
     assert len(uploader.verification_calls) == 1
     assert uploader.verification_calls[0]["repo_id"] == target
+    assert uploader.verification_calls[0]["revision"] == RecordingUploader.revision
     assert uploader.private_calls == [{"repo_id": target}]
-    assert uploader.public_calls == [{"repo_id": target}]
+    assert uploader.head_calls == [{"repo_id": target}]
+    assert uploader.public_calls == [
+        {"repo_id": target, "expected_revision": RecordingUploader.revision}
+    ]
+    assert result.revision == RecordingUploader.revision
+    assert result.installer_metadata == {
+        "revision": RecordingUploader.revision,
+        "url": (
+            f"https://huggingface.co/{target}/resolve/{RecordingUploader.revision}/{MODEL_NAME}"
+        ),
+        "sha256": bundle_metadata["artifact_sha256"],
+        "size_bytes": (tmp_path / MODEL_NAME).stat().st_size,
+    }
 
 
 def test_upload_is_not_reported_as_success_until_remote_bytes_are_verified(
@@ -832,6 +902,100 @@ def test_upload_is_not_reported_as_success_until_remote_bytes_are_verified(
     assert "remote_snapshot_unverified" in blocker_codes(result.decision)
     assert uploader.private_calls == [{"repo_id": DEFAULT_REPO_ID}]
     assert uploader.public_calls == []
+
+
+def test_upload_without_an_exact_commit_revision_fails_closed(tmp_path: Path) -> None:
+    publications = publication_module()
+    build_valid_bundle(tmp_path)
+    uploader = RecordingUploader()
+    uploader.revision = "main"
+
+    result = publications.publish_to_huggingface(
+        tmp_path,
+        policy=policy(),
+        signature_verifier=RecordingVerifier(),
+        uploader=uploader,
+    )
+
+    assert result.uploaded is False
+    assert "remote_revision_invalid" in blocker_codes(result.decision)
+    assert uploader.verification_calls == []
+    assert uploader.public_calls == []
+
+
+def test_head_drift_after_readback_blocks_make_public(tmp_path: Path) -> None:
+    publications = publication_module()
+    build_valid_bundle(tmp_path)
+    uploader = RecordingUploader(head_revision="f" * 40)
+
+    result = publications.publish_to_huggingface(
+        tmp_path,
+        policy=policy(),
+        signature_verifier=RecordingVerifier(),
+        uploader=uploader,
+    )
+
+    assert result.uploaded is False
+    assert "remote_head_changed" in blocker_codes(result.decision)
+    assert uploader.verification_calls[0]["revision"] == RecordingUploader.revision
+    assert uploader.public_calls == []
+
+
+def test_hub_adapter_reads_every_file_at_the_exact_uploaded_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publications = publication_module()
+    revision = RecordingUploader.revision
+    payloads = {"README.md": b"card", MODEL_NAME: b"GGUFmodel"}
+    calls: list[dict[str, object]] = []
+
+    class FakeAPI:
+        def list_repo_files(self, **kwargs: object) -> list[str]:
+            calls.append(kwargs)
+            return [*payloads, ".gitattributes"]
+
+    def fake_download(**kwargs: object) -> str:
+        calls.append(kwargs)
+        target = tmp_path / str(kwargs["filename"])
+        target.write_bytes(payloads[str(kwargs["filename"])])
+        return str(target)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    uploader = object.__new__(publications.HuggingFaceHubUploader)
+    uploader._api = FakeAPI()
+    uploader._token = "test-token"
+    snapshot = tuple(
+        (name, len(payload), sha256_bytes(payload)) for name, payload in payloads.items()
+    )
+
+    assert uploader.verify_uploaded_snapshot(
+        repo_id=DEFAULT_REPO_ID,
+        revision=revision,
+        snapshot=snapshot,
+    )
+    assert calls
+    assert all(call.get("revision") == revision for call in calls)
+
+
+def test_hub_adapter_rechecks_expected_head_inside_make_public() -> None:
+    publications = publication_module()
+
+    class FakeAPI:
+        def model_info(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(sha="f" * 40)
+
+        def update_repo_settings(self, **_kwargs: object) -> None:
+            raise AssertionError("drifted HEAD must never be made public")
+
+    uploader = object.__new__(publications.HuggingFaceHubUploader)
+    uploader._api = FakeAPI()
+    uploader._token = "test-token"
+
+    with pytest.raises(RuntimeError, match="HEAD changed"):
+        uploader.make_public(
+            repo_id=DEFAULT_REPO_ID,
+            expected_revision=RecordingUploader.revision,
+        )
 
 
 @pytest.mark.parametrize(
