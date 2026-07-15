@@ -491,6 +491,10 @@ def _cuda_cmake_arguments(
     return arguments
 
 
+def _native_build_jobs(*, cpu_count: int | None) -> int:
+    return max(1, min(cpu_count or 1, 4))
+
+
 def _build_gguf(
     *,
     plan: CloudExecutionPlan,
@@ -532,7 +536,7 @@ def _build_gguf(
             "llama-server",
             "llama-export-lora",
             "llama-quantize",
-            "-j1",
+            f"-j{_native_build_jobs(cpu_count=os.cpu_count())}",
         ],
         cwd=llama_cpp,
     )

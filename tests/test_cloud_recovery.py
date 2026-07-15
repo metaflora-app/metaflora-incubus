@@ -16,6 +16,7 @@ from metaflora_incubus.cloud_training import (
 from metaflora_incubus.cloud_training_runtime import (
     _authenticated_recovery_binding,
     _cuda_cmake_arguments,
+    _native_build_jobs,
     _reusable_final_gguf,
     _write_checkpoint_manifest,
 )
@@ -186,6 +187,14 @@ def test_cuda_cmake_arguments_use_kaggle_compat_driver(tmp_path: Path) -> None:
     assert "-DGGML_CUDA=ON" in arguments
     assert f"-DCMAKE_LIBRARY_PATH={driver.parent}" in arguments
     assert _cuda_cmake_arguments(cuda_enabled=False) == ["-DGGML_CUDA=OFF"]
+
+
+@pytest.mark.parametrize(
+    ("cpu_count", "expected"),
+    ((None, 1), (0, 1), (1, 1), (4, 4), (64, 4)),
+)
+def test_native_build_jobs_are_bounded(cpu_count: int | None, expected: int) -> None:
+    assert _native_build_jobs(cpu_count=cpu_count) == expected
 
 
 def recovery_plan(tmp_path: Path) -> CloudExecutionPlan:
