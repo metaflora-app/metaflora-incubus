@@ -470,6 +470,12 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
+    assert '[sys.executable, "-m", "pip", "uninstall", "-y", "torchvision"]' in source
+    assert source.index('"uninstall", "-y", "torchvision"') < source.index('"--require-hashes"')
+    assert "from peft import LoraConfig" in source
+    assert source.index("from peft import LoraConfig") < source.index(
+        'os.chdir("/content/metaflora-incubus")'
+    )
     assert source.index('os.chdir("/content")') < source.index(
         "shutil.rmtree(repository, ignore_errors=True)"
     )
