@@ -232,7 +232,6 @@ def test_plan_keeps_intermediate_weights_off_the_users_mac() -> None:
 def test_final_cloud_artifact_runs_pinned_local_benchmark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("INCUBUS_CODE_REVISION", "1" * 40)
     config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend.HF_PRIVATE_BRANCH,
@@ -262,20 +261,24 @@ def test_final_cloud_artifact_runs_pinned_local_benchmark(
         fake_run,
     )
 
-    evidence = _benchmark_final_gguf(plan=plan, artifact=artifact)
+    evidence = _benchmark_final_gguf(
+        plan=plan,
+        artifact=artifact,
+        environment={"INCUBUS_CODE_REVISION": "1" * 40},
+    )
 
     runner_config = captured["config"]
     assert runner_config.server_binary == server
     assert runner_config.model_path == artifact
     assert runner_config.cases_path.name == "gguf-v1-cases.jsonl"
     assert runner_config.seed == 4242
+    assert runner_config.gpu_layers == 999
     assert evidence["case_count"] == 48
 
 
 def test_recovered_artifact_uses_synced_benchmark_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("INCUBUS_CODE_REVISION", "1" * 40)
     config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend.HF_PRIVATE_BRANCH,
@@ -305,9 +308,56 @@ def test_recovered_artifact_uses_synced_benchmark_server(
         fake_run,
     )
 
-    _benchmark_final_gguf(plan=plan, artifact=artifact)
+    _benchmark_final_gguf(
+        plan=plan,
+        artifact=artifact,
+        environment={"INCUBUS_CODE_REVISION": "1" * 40},
+    )
 
     assert captured["config"].server_binary == synced_server
+
+
+def test_cpu_recovery_benchmark_uses_zero_gpu_layers_and_same_case_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    plan = CloudExecutionPlan.create_cpu_recovery(
+        config=config,
+        checkpoint_target=target,
+        run_id="cpu-recovery",
+        parameter_count=4_659_865_088,
+    )
+    artifact = tmp_path / "artifacts" / "metaflora-incubus-v1.gguf"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"GGUFmodel")
+    server = artifact.parent / "llama-server"
+    server.write_bytes(b"cpu-server")
+    captured: dict[str, object] = {}
+
+    def fake_run(runner_config):
+        captured["config"] = runner_config
+        return {"case_count": 48}
+
+    monkeypatch.setattr(
+        "metaflora_incubus.gguf_benchmark_runner.run_gguf_benchmark",
+        fake_run,
+    )
+
+    _benchmark_final_gguf(
+        plan=plan,
+        artifact=artifact,
+        environment={"INCUBUS_CODE_REVISION": "1" * 40},
+        gpu_layers=0,
+    )
+
+    runner_config = captured["config"]
+    assert runner_config.gpu_layers == 0
+    assert runner_config.cases_path.name == "gguf-v1-cases.jsonl"
 
 
 def test_cloud_disk_preflight_calculates_full_peak_and_fails_fast() -> None:

@@ -97,3 +97,45 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
     ] in commands
     assert any(command[-1] == "Q5_K_M" for command in commands)
     assert not any(command[-1] == "Q4_K_M" for command in commands)
+
+
+def test_cpu_recovery_build_disables_cuda_without_changing_release_export(
+    monkeypatch, tmp_path: Path
+) -> None:
+    plan = cloud_plan(tmp_path)
+    source = tmp_path / "source-cpu"
+    adapter = tmp_path / "adapter-cpu"
+    artifacts = tmp_path / "artifacts-cpu"
+    source.mkdir()
+    adapter.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], *, cwd=None) -> None:
+        commands.append(command)
+        if command[:2] == ["cmake", "--build"]:
+            server = Path(cwd) / "build/bin/llama-server"
+            server.parent.mkdir(parents=True, exist_ok=True)
+            server.write_bytes(b"cpu-server")
+        if command[-1] == "Q5_K_M":
+            output = Path(command[-2])
+            output.touch()
+            with output.open("r+b") as handle:
+                handle.truncate(5 * GIB // 2)
+
+    monkeypatch.setattr(
+        "metaflora_incubus.cloud_training_runtime._checkout_pinned_revision",
+        lambda repository, revision: None,
+    )
+    monkeypatch.setattr("metaflora_incubus.cloud_training_runtime._run", fake_run)
+
+    final = _build_gguf(
+        plan=plan,
+        source=source,
+        adapter=adapter,
+        artifacts=artifacts,
+        cuda_enabled=False,
+    )
+
+    assert final.name == "metaflora-incubus-v1.gguf"
+    assert any("-DGGML_CUDA=OFF" in command for command in commands)
+    assert not any("-DGGML_CUDA=ON" in command for command in commands)

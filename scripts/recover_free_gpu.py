@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from metaflora_incubus.cloud_failure_reporting import run_with_failure_reporting
@@ -43,6 +44,12 @@ def main() -> int:
     parser.add_argument("--parameter-count", required=True, type=int)
     parser.add_argument("--checkpoint-location", required=True)
     parser.add_argument("--checkpoint-branch", required=True)
+    parser.add_argument("--workspace-root", type=Path)
+    parser.add_argument(
+        "--cpu-fallback",
+        action="store_true",
+        help="recover and benchmark on CPU without probing or using a GPU",
+    )
     arguments = parser.parse_args()
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend.HF_PRIVATE_BRANCH,
@@ -50,17 +57,35 @@ def main() -> int:
         branch=arguments.checkpoint_branch,
     )
     config = load_cloud_config(Path(arguments.config))
-    plan = CloudExecutionPlan.create(
-        config=config,
-        checkpoint_target=target,
-        run_id=arguments.run_id,
-        parameter_count=arguments.parameter_count,
-        vram_bytes=detect_vram_bytes(),
-    )
+    if arguments.workspace_root is not None:
+        config = replace(config, workspace=arguments.workspace_root)
+    if arguments.cpu_fallback:
+        plan = CloudExecutionPlan.create_cpu_recovery(
+            config=config,
+            checkpoint_target=target,
+            run_id=arguments.run_id,
+            parameter_count=arguments.parameter_count,
+        )
+    else:
+        plan = CloudExecutionPlan.create(
+            config=config,
+            checkpoint_target=target,
+            run_id=arguments.run_id,
+            parameter_count=arguments.parameter_count,
+            vram_bytes=detect_vram_bytes(),
+        )
     code_revision = detect_code_revision()
+    runtime_environment = {
+        **os.environ,
+        "INCUBUS_CODE_REVISION": code_revision,
+    }
 
     def recover() -> dict[str, object]:
-        return recover_trained_artifact(plan=plan, environment=os.environ)
+        return recover_trained_artifact(
+            plan=plan,
+            environment=runtime_environment,
+            cpu_fallback=arguments.cpu_fallback,
+        )
 
     result = run_with_failure_reporting(
         recover,
@@ -68,7 +93,7 @@ def main() -> int:
         run_id=arguments.run_id,
         code_revision=code_revision,
         phase="artifact-recovery",
-        environment=os.environ,
+        environment=runtime_environment,
     )
     print(json.dumps(result, sort_keys=True))
     return 0

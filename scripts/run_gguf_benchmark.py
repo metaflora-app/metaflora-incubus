@@ -30,6 +30,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18081)
     parser.add_argument("--health-timeout", type=float, default=120.0)
     parser.add_argument("--request-timeout", type=float, default=120.0)
+    parser.add_argument("--gpu-layers", type=int, default=999)
     parser.add_argument(
         "--runner-code-revision",
         default=os.environ.get("INCUBUS_CODE_REVISION"),
@@ -49,6 +50,7 @@ def main() -> int:
         health_timeout_seconds=arguments.health_timeout,
         request_timeout_seconds=arguments.request_timeout,
         runner_code_revision=arguments.runner_code_revision,
+        gpu_layers=arguments.gpu_layers,
     )
     print(json.dumps(run_gguf_benchmark(config), sort_keys=True))
     return 0

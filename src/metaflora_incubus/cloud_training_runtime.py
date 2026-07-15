@@ -473,7 +473,12 @@ def preflight_training_text(
 
 
 def _build_gguf(
-    *, plan: CloudExecutionPlan, source: Path, adapter: Path, artifacts: Path
+    *,
+    plan: CloudExecutionPlan,
+    source: Path,
+    adapter: Path,
+    artifacts: Path,
+    cuda_enabled: bool = True,
 ) -> Path:  # pragma: no cover - requires the pinned native CUDA build image
     llama_cpp = plan.workspace / "llama.cpp"
     _run(
@@ -492,7 +497,7 @@ def _build_gguf(
             "-B",
             "build",
             "-DLLAMA_CURL=OFF",
-            "-DGGML_CUDA=ON",
+            f"-DGGML_CUDA={'ON' if cuda_enabled else 'OFF'}",
             "-DBUILD_SHARED_LIBS=OFF",
         ],
         cwd=llama_cpp,
@@ -615,7 +620,13 @@ def _write_artifact_state(*, checkpoint_root: Path, final: Path, phase: str) -> 
     return state
 
 
-def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[str, object]:
+def _benchmark_final_gguf(
+    *,
+    plan: CloudExecutionPlan,
+    artifact: Path,
+    environment: Mapping[str, str],
+    gpu_layers: int = 999,
+) -> dict[str, object]:
     """Run the committed release cases before the cloud workspace can be removed."""
     from metaflora_incubus.gguf_benchmark_runner import (
         BenchmarkRunnerConfig,
@@ -642,13 +653,17 @@ def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[s
         port=18081,
         health_timeout_seconds=120.0,
         request_timeout_seconds=120.0,
-        runner_code_revision=_required_revision(os.environ, "INCUBUS_CODE_REVISION"),
+        runner_code_revision=_required_revision(environment, "INCUBUS_CODE_REVISION"),
+        gpu_layers=gpu_layers,
     )
     return run_gguf_benchmark(config)
 
 
 def recover_trained_artifact(
-    *, plan: CloudExecutionPlan, environment: Mapping[str, str]
+    *,
+    plan: CloudExecutionPlan,
+    environment: Mapping[str, str],
+    cpu_fallback: bool = False,
 ) -> dict[str, object]:  # pragma: no cover - requires the pinned native cloud image
     """Export and benchmark an authenticated final adapter without loading trainers."""
 
@@ -703,6 +718,7 @@ def recover_trained_artifact(
                 source=source,
                 adapter=checkpoint_root / "final-adapter",
                 artifacts=checkpoint_root / "artifacts",
+                cuda_enabled=not cpu_fallback,
             )
             _write_artifact_state(
                 checkpoint_root=checkpoint_root,
@@ -712,7 +728,12 @@ def recover_trained_artifact(
         _write_checkpoint_manifest(checkpoint_root, binding=binding, key=checkpoint_key)
         store.sync(checkpoint_root)
     with _hidden_huggingface_credentials(Path.home()):
-        benchmark = _benchmark_final_gguf(plan=plan, artifact=final)
+        benchmark = _benchmark_final_gguf(
+            plan=plan,
+            artifact=final,
+            environment=environment,
+            gpu_layers=0 if cpu_fallback else 999,
+        )
     metadata = {
         "artifact_sha256": _sha256_file(final),
         "artifact_size_bytes": final.stat().st_size,
@@ -964,7 +985,11 @@ def execute_training_and_build(
         final = _build_gguf(
             plan=plan, source=source, adapter=adapter, artifacts=checkpoint_root / "artifacts"
         )
-        benchmark = _benchmark_final_gguf(plan=plan, artifact=final)
+        benchmark = _benchmark_final_gguf(
+            plan=plan,
+            artifact=final,
+            environment=environment,
+        )
     artifact_sha256 = _sha256_file(final)
     metadata = {
         "artifact_sha256": artifact_sha256,

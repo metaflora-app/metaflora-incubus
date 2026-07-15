@@ -521,6 +521,8 @@ def _check_benchmark_evidence(
             raise ValueError("sample count mismatch")
         if provenance.get("attestation_sha256") != evidence.attestation_sha256:
             raise ValueError("attestation hash mismatch")
+        if provenance.get("runner_code_revision") != evidence.runner_code_revision:
+            raise ValueError("runner revision mismatch")
         gate_input = _mapping(report["gate_input"])
         deployable = _mapping(gate_input["deployable_candidate"])
         expected_scores = _mapping(deployable["scores"])

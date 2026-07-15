@@ -166,6 +166,39 @@ def recovery_plan(tmp_path: Path) -> CloudExecutionPlan:
     return plan
 
 
+def test_cpu_recovery_plan_validates_parameter_limit_without_weakening_gpu_plan() -> None:
+    config = load_cloud_config(Path("configs/cloud/free-gpu-v1.json"))
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="metaflora/incubus-checkpoints",
+        branch="incubus-training-v1",
+    )
+
+    plan = CloudExecutionPlan.create_cpu_recovery(
+        config=config,
+        checkpoint_target=target,
+        run_id="incubus-v1-cpu",
+        parameter_count=4_659_865_088,
+    )
+
+    assert plan.training_mode == "recovery_only_cpu"
+    with pytest.raises(CloudConstraintError, match="parameter"):
+        CloudExecutionPlan.create_cpu_recovery(
+            config=config,
+            checkpoint_target=target,
+            run_id="incubus-v1-too-large",
+            parameter_count=config.profile.max_parameter_count + 1,
+        )
+    with pytest.raises(CloudConstraintError, match="VRAM"):
+        CloudExecutionPlan.create(
+            config=config,
+            checkpoint_target=target,
+            run_id="incubus-v1-gpu",
+            parameter_count=4_659_865_088,
+            vram_bytes=0,
+        )
+
+
 def test_recovery_reuses_valid_private_gguf(tmp_path: Path) -> None:
     plan = recovery_plan(tmp_path)
     artifact = tmp_path / "checkpoints" / "artifacts" / "metaflora-incubus-v1.gguf"

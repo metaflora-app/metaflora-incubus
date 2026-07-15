@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ def config(tmp_path: Path) -> BenchmarkRunnerConfig:
         health_timeout_seconds=2.0,
         request_timeout_seconds=5.0,
         runner_code_revision="1" * 40,
+        gpu_layers=999,
     )
 
 
@@ -169,6 +171,7 @@ def test_runner_starts_pinned_server_and_writes_bound_evidence(tmp_path: Path) -
     )
     assert all("tool_call_parse" in row for row in raw_rows)
     assert stored_evidence == evidence
+    assert stored_evidence["settings"]["gpu_layers"] == 999
     assert stored_evidence["raw_sha256"] == digest(active_config.output_dir / "benchmark-raw.jsonl")
     attestation = json.loads(
         (active_config.output_dir / "benchmark-attestation.json").read_text(encoding="utf-8")
@@ -183,6 +186,27 @@ def test_runner_starts_pinned_server_and_writes_bound_evidence(tmp_path: Path) -
         "seeds": [4242],
     }
     assert (active_config.output_dir / "benchmark-attestation.sig").read_bytes() == b"s" * 64
+
+
+def test_runner_accepts_explicit_cpu_offload_and_keeps_it_immutable(tmp_path: Path) -> None:
+    active_config = BenchmarkRunnerConfig.create(
+        **{
+            **config(tmp_path).__dict__,
+            "gpu_layers": 0,
+        }
+    )
+
+    assert active_config.gpu_layers == 0
+    with pytest.raises(FrozenInstanceError):
+        active_config.gpu_layers = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("gpu_layers", (-1, True, 1.5, "0"))
+def test_runner_rejects_invalid_gpu_layer_count(tmp_path: Path, gpu_layers: object) -> None:
+    values = {**config(tmp_path).__dict__, "gpu_layers": gpu_layers}
+
+    with pytest.raises(GgufBenchmarkError, match="gpu_layers"):
+        BenchmarkRunnerConfig.create(**values)
 
 
 def test_runner_fails_before_process_on_artifact_mismatch(tmp_path: Path) -> None:

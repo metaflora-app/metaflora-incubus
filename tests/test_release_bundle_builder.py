@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -187,7 +188,7 @@ def release_inputs(tmp_path: Path, *, deployable_passing: bool = True) -> Releas
             ),
         },
         runtime_id="llama.cpp-b7001",
-        harness_revision="0123456789abcdef0123456789abcdef01234567",
+        harness_revision="1" * 40,
         license_path=license_path,
         notices_path=notices_path,
     )
@@ -229,6 +230,24 @@ def test_builds_a_complete_release_gated_hugging_face_bundle(tmp_path: Path) -> 
     card = (inputs.output_dir / "README.md").read_text(encoding="utf-8")
     assert "1.000000" in card
     assert "private-source-name" not in card
+
+
+def test_rejects_runner_revision_not_approved_by_release_inputs(tmp_path: Path) -> None:
+    inputs = replace(release_inputs(tmp_path), harness_revision="2" * 40)
+    policy = PublicationPolicy(
+        repo_id="metaflora/incubus",
+        min_model_bytes=8,
+        max_model_bytes=32,
+        prohibited_identifiers=("private-source-name",),
+    )
+
+    with pytest.raises(ReleaseBundleError, match="runner revision"):
+        build_release_bundle(
+            inputs,
+            signer=signer,
+            signature_verifier=verifier,
+            publication_policy=policy,
+        )
 
 
 def test_fails_closed_without_creating_bundle_when_benchmarks_miss_gate(tmp_path: Path) -> None:

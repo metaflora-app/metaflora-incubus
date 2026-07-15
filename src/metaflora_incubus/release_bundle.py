@@ -83,6 +83,8 @@ def build_release_bundle(
         raise ReleaseBundleError("benchmark evidence is not bound to the release model")
     if evidence.dataset_sha256 != PINNED_V1_DATASET_SHA256:
         raise ReleaseBundleError("deployable benchmark does not use the pinned v1 case bank")
+    if evidence.runner_code_revision != inputs.harness_revision:
+        raise ReleaseBundleError("benchmark runner revision is not approved for this release")
     deployable = BenchmarkReport(
         artifact_id=f"incubus-v1-q5-{artifact_sha[:12]}",
         suite_id="incubus-release-v1",
@@ -199,6 +201,7 @@ def _render_bundle(
         "artifact_sha256": artifact_sha,
         "report_sha256": hashlib.sha256(report_payload).hexdigest(),
         "harness_revision": inputs.harness_revision,
+        "runner_code_revision": evidence.runner_code_revision,
         "dataset_sha256": evidence.dataset_sha256,
         "raw_output_sha256": evidence.raw_output_sha256,
         "sample_count": evidence.sample_count,

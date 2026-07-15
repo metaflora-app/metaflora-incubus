@@ -107,6 +107,7 @@ class BenchmarkRunnerConfig:
     health_timeout_seconds: float
     request_timeout_seconds: float
     runner_code_revision: str
+    gpu_layers: int
 
     @classmethod
     def create(cls, **values: object) -> BenchmarkRunnerConfig:
@@ -122,6 +123,7 @@ class BenchmarkRunnerConfig:
         request_timeout = _positive_float(
             values.get("request_timeout_seconds"), "request_timeout_seconds"
         )
+        gpu_layers = _positive_int(values.get("gpu_layers"), "gpu_layers", allow_zero=True)
         runner_revision = values.get("runner_code_revision")
         if not isinstance(runner_revision, str) or _LOWER_HEX_40.fullmatch(runner_revision) is None:
             raise GgufBenchmarkError("runner_code_revision must be exact lowercase revision")
@@ -137,6 +139,7 @@ class BenchmarkRunnerConfig:
             health_timeout_seconds=health_timeout,
             request_timeout_seconds=request_timeout,
             runner_code_revision=runner_revision,
+            gpu_layers=gpu_layers,
         )
 
 
@@ -383,7 +386,7 @@ def _server_command(config: BenchmarkRunnerConfig) -> list[str]:
         "--parallel",
         "1",
         "--gpu-layers",
-        "999",
+        str(config.gpu_layers),
         "--ctx-size",
         "4096",
     ]
@@ -441,7 +444,13 @@ def _write_evidence(
         "runtime_sha256": config.server_sha256,
         "scores": scores,
         "seed": config.seed,
-        "settings": {"max_tokens": 512, "parallel": 1, "stream": False, "temperature": 0},
+        "settings": {
+            "gpu_layers": config.gpu_layers,
+            "max_tokens": 512,
+            "parallel": 1,
+            "stream": False,
+            "temperature": 0,
+        },
     }
     config.output_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write(config.output_dir / "benchmark-cases.jsonl", cases_payload)

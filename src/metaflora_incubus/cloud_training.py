@@ -61,12 +61,15 @@ class FreeGpuProfile:
         )
 
     def validate(self, *, parameter_count: int, vram_bytes: int) -> None:
+        self.validate_parameter_count(parameter_count)
+        if vram_bytes < self.min_vram_bytes:
+            raise CloudConstraintError("GPU VRAM is below the 15 GiB free-tier floor")
+
+    def validate_parameter_count(self, parameter_count: int) -> None:
         if parameter_count <= 0 or parameter_count > self.max_parameter_count:
             raise CloudConstraintError(
                 "parameter count exceeds the honest free-tier compact profile"
             )
-        if vram_bytes < self.min_vram_bytes:
-            raise CloudConstraintError("GPU VRAM is below the 15 GiB free-tier floor")
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,41 @@ class CloudExecutionPlan:
                 "merge_gguf_in_cloud",
                 "quantize_q5_k_m",
                 "run_candidate_benchmark",
+                "sync_private_evidence",
+                "delete_ephemeral_workspace",
+            ),
+        )
+
+    @classmethod
+    def create_cpu_recovery(
+        cls,
+        *,
+        config: CloudConfig,
+        checkpoint_target: RemoteCheckpointTarget,
+        run_id: str,
+        parameter_count: int,
+    ) -> CloudExecutionPlan:
+        """Create an export-only CPU plan without relaxing GPU training validation."""
+
+        if not _RUN_ID.fullmatch(run_id):
+            raise CloudConstraintError("invalid run_id")
+        config.profile.validate_parameter_count(parameter_count)
+        return cls(
+            config=config,
+            checkpoint_target=checkpoint_target,
+            run_id=run_id,
+            parameter_count=parameter_count,
+            workspace=config.workspace / run_id,
+            local_retention=False,
+            resume_enabled=True,
+            training_mode="recovery_only_cpu",
+            final_gguf_quantization=config.profile.final_gguf_quantization,
+            post_training_steps=(
+                "convert_base_to_f16_gguf",
+                "convert_adapter_to_gguf",
+                "merge_gguf_in_cloud",
+                "quantize_q5_k_m",
+                "run_candidate_benchmark_cpu",
                 "sync_private_evidence",
                 "delete_ephemeral_workspace",
             ),

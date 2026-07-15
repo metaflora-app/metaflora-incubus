@@ -258,6 +258,7 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             "sample_count": len(raw_rows),
             "runtime": "llama.cpp-b7001",
             "seeds": [4242],
+            "runner_code_revision": "1" * 40,
             "attestation_sha256": sha256_bytes(attestation_payload),
         },
     )
