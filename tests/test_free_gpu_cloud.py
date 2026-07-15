@@ -470,8 +470,14 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert "scripts/run_free_gpu.py" in source
     assert "--execute" in source
     assert "--require-hashes" in source
-    assert '[sys.executable, "-m", "pip", "uninstall", "-y", "torchvision"]' in source
-    assert source.index('"uninstall", "-y", "torchvision"') < source.index('"--require-hashes"')
+    assert '"uninstall", "-y", "torchvision", "torchaudio"' in source
+    assert source.index('"uninstall", "-y", "torchvision", "torchaudio"') < source.index(
+        '"--require-hashes"'
+    )
+    assert 'Path(root).glob("nvidia/*/lib")' in source
+    assert 'runtime_environment["LD_LIBRARY_PATH"]' in source
+    assert "bitsandbytes.functional.quantize_4bit" in source
+    assert source.count("env=runtime_environment") == 2
     assert "from peft import LoraConfig" in source
     assert source.index("from peft import LoraConfig") < source.index(
         'os.chdir("/content/metaflora-incubus")'
