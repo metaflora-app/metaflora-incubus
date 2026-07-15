@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 
 from metaflora_incubus.huggingface_publication import (
+    MIN_MODEL_BYTES,
     MODEL_NAME,
     PublicationDecision,
     PublicationPolicy,
@@ -264,8 +265,8 @@ def authorize_publication(
     if not artifact_path.is_file() or artifact_path.suffix.lower() != ".gguf":
         raise CloudConstraintError("deployable GGUF artifact is missing")
     size = artifact_path.stat().st_size
-    if size < THREE_GIB:
-        raise CloudConstraintError("final GGUF must be at least 3 GiB")
+    if size < MIN_MODEL_BYTES:
+        raise CloudConstraintError("final GGUF must be at least 2.5 GiB")
     if size > FIVE_GIB:
         raise CloudConstraintError("final GGUF must be greater than zero and at most 5 GiB")
     digest = hashlib.sha256()
@@ -296,7 +297,7 @@ def publish_after_eval_gates(
         raise CloudConstraintError("authorized artifact is not the bundle deployable")
     policy = PublicationPolicy(
         repo_id=authorization.repo_id,
-        min_model_bytes=THREE_GIB,
+        min_model_bytes=MIN_MODEL_BYTES,
         max_model_bytes=FIVE_GIB,
         prohibited_identifiers=prohibited_identifiers,
     )
