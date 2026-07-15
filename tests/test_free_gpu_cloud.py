@@ -607,8 +607,7 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
 
     assert "training_length = min(plan.config.profile.max_sequence_length, 1024)" in source
     assert (
-        "preference_length = min(training_length, 512) if refinement else training_length"
-        in source
+        "preference_length = min(training_length, 512) if refinement else training_length" in source
     )
     assert "max_steps=32" in source
     assert "save_steps=8" in source

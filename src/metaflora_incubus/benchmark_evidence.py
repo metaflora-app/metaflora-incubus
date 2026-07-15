@@ -227,11 +227,7 @@ def _text(value: object, label: str) -> str:
 
 
 def _unit_score(value: object) -> float:
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not 0 <= float(value) <= 1
-    ):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= float(value) <= 1:
         raise BenchmarkEvidenceError("benchmark scores must be in [0, 1]")
     return float(value)
 

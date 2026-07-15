@@ -12,8 +12,8 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Metaflora" }]
 dependencies = [
   "fastapi>=0.115,<1",
-  "cryptography>=44,<47",
-  "huggingface-hub>=0.28,<1",
+  "cryptography>=48.0.1,<49",
+  "huggingface-hub>=1.5,<2",
   "pydantic>=2.9,<3",
   "safetensors>=0.4,<1",
   "torch>=2.5,<3",

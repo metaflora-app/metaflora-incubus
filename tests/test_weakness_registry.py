@@ -3,6 +3,7 @@ from dataclasses import FrozenInstanceError
 from datetime import date
 
 import pytest
+
 from metaflora_incubus.weakness_registry import (
     DuplicateReproducerError,
     EvaluatorEvidence,

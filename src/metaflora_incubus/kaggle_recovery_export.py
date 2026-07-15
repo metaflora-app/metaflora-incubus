@@ -12,12 +12,18 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 GIB = 1024**3
 _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{2,63}")
 _GGUF_MAGIC = b"GGUF"
 _STATE_NAME = "recovery-state.json"
 _MANIFEST_NAME = "candidate-export.json"
+_SHA256_NAME = "candidate-sha256.txt"
+_UPLOAD_RECEIPT_NAME = "candidate-upload-receipt.json"
+_REPO_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
+_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}")
+_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class ExportRecoveryError(ValueError):
@@ -67,9 +73,10 @@ class RecoveryExportConfig:
         merger = _required_file(Path(merge_script), "merge helper")
         converter = _required_file(Path(convert_script), "GGUF converter")
         quantizer = _required_file(Path(quantize_binary), "GGUF quantizer")
-        if not (adapter_path / "adapter_config.json").is_file() or not (
-            adapter_path / "adapter_model.safetensors"
-        ).is_file():
+        if (
+            not (adapter_path / "adapter_config.json").is_file()
+            or not (adapter_path / "adapter_model.safetensors").is_file()
+        ):
             raise ExportRecoveryError("completed DPO adapter files are missing")
         workspace_path = Path(workspace)
         if workspace_path.is_symlink():
@@ -109,6 +116,59 @@ class RecoveryExportResult:
     artifact_size_bytes: int
     manifest: Path
     resumed: bool
+
+
+@dataclass(frozen=True)
+class PrivateCandidateUploadResult:
+    artifact_revision: str
+    evidence_revision: str
+    remote_prefix: str
+    receipt: Path
+
+
+class PrivateCandidateStore(Protocol):
+    def ensure_private(self, *, repo_id: str, branch: str) -> None: ...
+
+    def upload_candidate(
+        self,
+        *,
+        repo_id: str,
+        branch: str,
+        folder: Path,
+        remote_prefix: str,
+        filenames: tuple[str, ...],
+    ) -> str: ...
+
+    def verify_candidate(
+        self,
+        *,
+        repo_id: str,
+        revision: str,
+        remote_prefix: str,
+        artifact_name: str,
+        artifact_sha256: str,
+        artifact_size_bytes: int,
+        evidence_sha256: Mapping[str, str],
+    ) -> bool: ...
+
+    def upload_receipt(
+        self,
+        *,
+        repo_id: str,
+        branch: str,
+        receipt: Path,
+        path_in_repo: str,
+        parent_revision: str,
+    ) -> str: ...
+
+    def verify_receipt(
+        self,
+        *,
+        repo_id: str,
+        revision: str,
+        path_in_repo: str,
+        expected_sha256: str,
+    ) -> bool: ...
 
 
 ResourceProbe = Callable[[Path], ResourceSnapshot]
@@ -236,6 +296,236 @@ def execute_recovery_export(
     return _write_result(config, artifact, state, resumed=resumed)
 
 
+def upload_private_candidate(
+    *,
+    config: RecoveryExportConfig,
+    result: RecoveryExportResult,
+    repo_id: str,
+    branch: str,
+    store: PrivateCandidateStore | None = None,
+) -> PrivateCandidateUploadResult:
+    """Persist one completed candidate to a private Hub revision before Kaggle exits."""
+
+    if _REPO_ID.fullmatch(repo_id) is None:
+        raise ExportRecoveryError("private checkpoint repository is invalid")
+    if (
+        _BRANCH.fullmatch(branch) is None
+        or ".." in branch
+        or branch.endswith("/")
+        or "//" in branch
+    ):
+        raise ExportRecoveryError("private checkpoint branch is invalid")
+    if result.artifact.parent != config.workspace or result.manifest.parent != config.workspace:
+        raise ExportRecoveryError("candidate upload paths are outside the recovery workspace")
+    _require_gguf(
+        result.artifact,
+        minimum_size=config.minimum_output_bytes,
+        maximum_size=config.maximum_output_bytes,
+    )
+    if _sha256_file(result.artifact) != result.artifact_sha256:
+        raise ExportRecoveryError("candidate changed before private upload")
+    if result.artifact.stat().st_size != result.artifact_size_bytes:
+        raise ExportRecoveryError("candidate size changed before private upload")
+    if not result.manifest.is_file() or result.manifest.is_symlink():
+        raise ExportRecoveryError("candidate manifest is invalid")
+
+    checksum = config.workspace / _SHA256_NAME
+    _atomic_text(checksum, f"{result.artifact_sha256}  {result.artifact.name}\n")
+    filenames = tuple(sorted((result.manifest.name, checksum.name, result.artifact.name)))
+    evidence_sha256 = {
+        result.manifest.name: _sha256_file(result.manifest),
+        checksum.name: _sha256_file(checksum),
+    }
+    remote_prefix = f"runs/{config.run_id}/exports/q5-k-m/{result.artifact_sha256}"
+    receipt_path_in_repo = f"runs/{config.run_id}/exports/{_UPLOAD_RECEIPT_NAME}"
+    private_store = store or HuggingFacePrivateCandidateStore()
+    private_store.ensure_private(repo_id=repo_id, branch=branch)
+    artifact_revision = private_store.upload_candidate(
+        repo_id=repo_id,
+        branch=branch,
+        folder=config.workspace,
+        remote_prefix=remote_prefix,
+        filenames=filenames,
+    )
+    if _REVISION.fullmatch(artifact_revision) is None:
+        raise ExportRecoveryError("private candidate upload returned an invalid revision")
+    if not private_store.verify_candidate(
+        repo_id=repo_id,
+        revision=artifact_revision,
+        remote_prefix=remote_prefix,
+        artifact_name=result.artifact.name,
+        artifact_sha256=result.artifact_sha256,
+        artifact_size_bytes=result.artifact_size_bytes,
+        evidence_sha256=evidence_sha256,
+    ):
+        raise ExportRecoveryError("private candidate upload verification failed")
+
+    receipt = config.workspace / _UPLOAD_RECEIPT_NAME
+    _atomic_json(
+        receipt,
+        {
+            "artifact_path": f"{remote_prefix}/{result.artifact.name}",
+            "artifact_revision": artifact_revision,
+            "artifact_sha256": result.artifact_sha256,
+            "artifact_size_bytes": result.artifact_size_bytes,
+            "branch": branch,
+            "gguf_quantization": "Q5_K_M",
+            "release_ready": False,
+            "remote_prefix": remote_prefix,
+            "repo_id": repo_id,
+            "required_next_step": "run_parity_and_release_gates",
+            "run_id": config.run_id,
+            "schema_version": 1,
+        },
+        pretty=True,
+    )
+    evidence_revision = private_store.upload_receipt(
+        repo_id=repo_id,
+        branch=branch,
+        receipt=receipt,
+        path_in_repo=receipt_path_in_repo,
+        parent_revision=artifact_revision,
+    )
+    if _REVISION.fullmatch(evidence_revision) is None:
+        raise ExportRecoveryError("private upload receipt returned an invalid revision")
+    if not private_store.verify_receipt(
+        repo_id=repo_id,
+        revision=evidence_revision,
+        path_in_repo=receipt_path_in_repo,
+        expected_sha256=_sha256_file(receipt),
+    ):
+        raise ExportRecoveryError("private upload receipt verification failed")
+    return PrivateCandidateUploadResult(
+        artifact_revision=artifact_revision,
+        evidence_revision=evidence_revision,
+        remote_prefix=remote_prefix,
+        receipt=receipt,
+    )
+
+
+class HuggingFacePrivateCandidateStore:
+    """Minimal authenticated Hub adapter for content-addressed recovery artifacts."""
+
+    def __init__(self) -> None:
+        from huggingface_hub import HfApi
+
+        self._api = HfApi(token=None)
+
+    def ensure_private(self, *, repo_id: str, branch: str) -> None:
+        info = self._api.model_info(repo_id=repo_id)
+        if info.private is not True:
+            raise ExportRecoveryError("checkpoint repository is not private")
+        self._api.create_branch(repo_id=repo_id, branch=branch, exist_ok=True)
+
+    def upload_candidate(
+        self,
+        *,
+        repo_id: str,
+        branch: str,
+        folder: Path,
+        remote_prefix: str,
+        filenames: tuple[str, ...],
+    ) -> str:
+        commit = self._api.upload_folder(
+            repo_id=repo_id,
+            repo_type="model",
+            revision=branch,
+            folder_path=str(folder),
+            path_in_repo=remote_prefix,
+            allow_patterns=list(filenames),
+            commit_message="Store private Q5_K_M recovery candidate",
+        )
+        return str(commit.oid).lower()
+
+    def verify_candidate(
+        self,
+        *,
+        repo_id: str,
+        revision: str,
+        remote_prefix: str,
+        artifact_name: str,
+        artifact_sha256: str,
+        artifact_size_bytes: int,
+        evidence_sha256: Mapping[str, str],
+    ) -> bool:
+        from huggingface_hub import hf_hub_download
+
+        info = self._api.model_info(repo_id=repo_id, revision=revision, files_metadata=True)
+        if info.private is not True or str(info.sha).lower() != revision:
+            return False
+        siblings = {item.rfilename: item for item in info.siblings}
+        artifact_path = f"{remote_prefix}/{artifact_name}"
+        artifact = siblings.get(artifact_path)
+        if (
+            artifact is None
+            or artifact.size != artifact_size_bytes
+            or artifact.lfs is None
+            or artifact.lfs.sha256 != artifact_sha256
+            or artifact.lfs.size != artifact_size_bytes
+        ):
+            return False
+        for filename, expected_sha256 in evidence_sha256.items():
+            remote_path = f"{remote_prefix}/{filename}"
+            if remote_path not in siblings:
+                return False
+            downloaded = Path(
+                hf_hub_download(
+                    repo_id=repo_id,
+                    repo_type="model",
+                    revision=revision,
+                    filename=remote_path,
+                    token=None,
+                )
+            )
+            if _sha256_file(downloaded) != expected_sha256:
+                return False
+        return True
+
+    def upload_receipt(
+        self,
+        *,
+        repo_id: str,
+        branch: str,
+        receipt: Path,
+        path_in_repo: str,
+        parent_revision: str,
+    ) -> str:
+        commit = self._api.upload_file(
+            repo_id=repo_id,
+            repo_type="model",
+            revision=branch,
+            path_or_fileobj=str(receipt),
+            path_in_repo=path_in_repo,
+            parent_commit=parent_revision,
+            commit_message="Record immutable recovery candidate revision",
+        )
+        return str(commit.oid).lower()
+
+    def verify_receipt(
+        self,
+        *,
+        repo_id: str,
+        revision: str,
+        path_in_repo: str,
+        expected_sha256: str,
+    ) -> bool:
+        from huggingface_hub import hf_hub_download
+
+        info = self._api.model_info(repo_id=repo_id, revision=revision)
+        if info.private is not True or str(info.sha).lower() != revision:
+            return False
+        downloaded = Path(
+            hf_hub_download(
+                repo_id=repo_id,
+                repo_type="model",
+                revision=revision,
+                filename=path_in_repo,
+                token=None,
+            )
+        )
+        return _sha256_file(downloaded) == expected_sha256
+
+
 def probe_resources(path: Path) -> ResourceSnapshot:
     """Read currently available RAM and free bytes on the workspace filesystem."""
 
@@ -346,9 +636,7 @@ def _write_result(
     )
 
 
-def _record_file_stage(
-    stages: Mapping[str, object], name: str, path: Path
-) -> dict[str, object]:
+def _record_file_stage(stages: Mapping[str, object], name: str, path: Path) -> dict[str, object]:
     return {
         **stages,
         name: {"path": path.name, "sha256": _sha256_file(path), "size_bytes": path.stat().st_size},
@@ -392,9 +680,7 @@ def _valid_directory_stage(path: Path, record: object) -> bool:
     )
 
 
-def _require_gguf(
-    path: Path, *, minimum_size: int, maximum_size: int | None = None
-) -> None:
+def _require_gguf(path: Path, *, minimum_size: int, maximum_size: int | None = None) -> None:
     if path.is_symlink() or not path.is_file():
         raise ExportRecoveryError("GGUF export is missing")
     size = path.stat().st_size
@@ -467,13 +753,30 @@ def _sha256_file(path: Path) -> str:
 
 def _atomic_json(path: Path, value: Mapping[str, object], *, pretty: bool = False) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        indent=2 if pretty else None,
-        separators=None if pretty else (",", ":"),
-        sort_keys=True,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            separators=None if pretty else (",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    path.chmod(0o600)
+
+
+def _atomic_text(path: Path, payload: str) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW

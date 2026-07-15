@@ -37,10 +37,10 @@ def test_cpu_fallback_never_probes_nvidia_and_propagates_explicit_mode(monkeypat
     monkeypatch.setattr(
         runner,
         "recover_trained_artifact",
-        lambda **values: captured.update(
-            {**values, "environment": dict(values["environment"])}
-        )
-        or {"case_count": 48},
+        lambda **values: (
+            captured.update({**values, "environment": dict(values["environment"])})
+            or {"case_count": 48}
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -76,14 +76,18 @@ def test_workspace_root_overrides_colab_default_for_kaggle(monkeypatch) -> None:
     plan = object()
     monkeypatch.setattr(runner, "detect_code_revision", lambda: "a" * 40)
     monkeypatch.setattr(runner, "detect_vram_bytes", lambda: 32 * 1024**3)
-    monkeypatch.setattr(runner, "load_cloud_config", lambda path: CloudConfig(
-        product_id="metaflora-incubus-v1",
-        workspace=Path("/content/incubus-work"),
-        public_repo_id="metaflora/incubus",
-        profile=FreeGpuProfile.default(),
-        llama_cpp_revision="1" * 40,
-        config_sha256="2" * 64,
-    ))
+    monkeypatch.setattr(
+        runner,
+        "load_cloud_config",
+        lambda path: CloudConfig(
+            product_id="metaflora-incubus-v1",
+            workspace=Path("/content/incubus-work"),
+            public_repo_id="metaflora/incubus",
+            profile=FreeGpuProfile.default(),
+            llama_cpp_revision="1" * 40,
+            config_sha256="2" * 64,
+        ),
+    )
     monkeypatch.setattr(
         runner.CloudExecutionPlan,
         "create",

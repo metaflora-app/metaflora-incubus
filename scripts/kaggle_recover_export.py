@@ -12,6 +12,7 @@ from metaflora_incubus.kaggle_recovery_export import (
     ExportRecoveryError,
     RecoveryExportConfig,
     execute_recovery_export,
+    upload_private_candidate,
 )
 
 
@@ -26,7 +27,11 @@ def main() -> int:
     parser.add_argument("--quantize-binary", type=Path, required=True)
     parser.add_argument("--minimum-free-disk-gib", type=int, default=24)
     parser.add_argument("--minimum-ram-gib", type=int, default=20)
+    parser.add_argument("--upload-repo")
+    parser.add_argument("--upload-branch")
     arguments = parser.parse_args()
+    if bool(arguments.upload_repo) != bool(arguments.upload_branch):
+        raise SystemExit("--upload-repo and --upload-branch must be provided together")
     try:
         config = RecoveryExportConfig.create(
             run_id=arguments.run_id,
@@ -40,6 +45,16 @@ def main() -> int:
             minimum_ram_bytes=arguments.minimum_ram_gib * GIB,
         )
         result = execute_recovery_export(config)
+        uploaded = (
+            upload_private_candidate(
+                config=config,
+                result=result,
+                repo_id=arguments.upload_repo,
+                branch=arguments.upload_branch,
+            )
+            if arguments.upload_repo and arguments.upload_branch
+            else None
+        )
     except ExportRecoveryError as exc:
         raise SystemExit(str(exc)) from exc
     print(
@@ -50,6 +65,13 @@ def main() -> int:
                 "artifact_size_bytes": result.artifact_size_bytes,
                 "gguf_quantization": "Q5_K_M",
                 "manifest": str(result.manifest),
+                "private_artifact_revision": (
+                    uploaded.artifact_revision if uploaded is not None else None
+                ),
+                "private_evidence_revision": (
+                    uploaded.evidence_revision if uploaded is not None else None
+                ),
+                "private_remote_prefix": (uploaded.remote_prefix if uploaded is not None else None),
                 "resumed": result.resumed,
                 "run_id": arguments.run_id,
             },

@@ -359,9 +359,7 @@ def test_recovery_rejects_private_gguf_without_synced_server(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("size_bytes", (0, 5 * GIB // 2 - 1, 5 * GIB + 1))
-def test_recovery_rejects_incomplete_private_gguf(
-    tmp_path: Path, size_bytes: int
-) -> None:
+def test_recovery_rejects_incomplete_private_gguf(tmp_path: Path, size_bytes: int) -> None:
     plan = recovery_plan(tmp_path)
     artifact = tmp_path / "checkpoints" / "artifacts" / "metaflora-incubus-v1.gguf"
     artifact.parent.mkdir(parents=True)

@@ -32,7 +32,7 @@ def test_recovery_notebook_is_single_cell_and_skips_training() -> None:
     assert "run_free_gpu.py" not in source
     assert "requirements/recovery-linux.lock" in source
     assert "requirements/cloud-linux.lock" not in source
-    assert "pip\", \"uninstall" not in source
+    assert 'pip", "uninstall' not in source
     assert "torchvision" not in source
     assert "torchaudio" not in source
     revision = re.search(r'trusted_code_revision = "([0-9a-f]{40})"', source)

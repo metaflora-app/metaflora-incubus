@@ -9,9 +9,11 @@ import pytest
 from metaflora_incubus.kaggle_recovery_export import (
     GIB,
     ExportRecoveryError,
+    PrivateCandidateUploadResult,
     RecoveryExportConfig,
     ResourceSnapshot,
     execute_recovery_export,
+    upload_private_candidate,
 )
 
 
@@ -190,9 +192,7 @@ def test_stale_workspace_without_state_is_discarded_and_rebuilt(tmp_path: Path) 
     (config.workspace / "metaflora-incubus-v1.gguf").write_bytes(b"GGUF-stale-q5")
     commands = FakeCommands()
 
-    result = execute_recovery_export(
-        config, resources=_ample_resources, command_runner=commands
-    )
+    result = execute_recovery_export(config, resources=_ample_resources, command_runner=commands)
 
     assert len(commands.calls) == 3
     assert result.artifact.read_bytes() == b"GGUF-q5-model"
@@ -203,18 +203,14 @@ def test_stale_workspace_without_state_is_discarded_and_rebuilt(tmp_path: Path) 
 def test_output_without_matching_stage_record_is_not_adopted(tmp_path: Path) -> None:
     config = _config(tmp_path)
     initial_commands = FakeCommands()
-    execute_recovery_export(
-        config, resources=_ample_resources, command_runner=initial_commands
-    )
+    execute_recovery_export(config, resources=_ample_resources, command_runner=initial_commands)
     state_path = config.workspace / "recovery-state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     del state["stages"]["quantize"]
     state_path.write_text(json.dumps(state), encoding="utf-8")
     commands = FakeCommands()
 
-    result = execute_recovery_export(
-        config, resources=_ample_resources, command_runner=commands
-    )
+    result = execute_recovery_export(config, resources=_ample_resources, command_runner=commands)
 
     assert len(commands.calls) == 1
     assert commands.calls[0][-1] == "Q5_K_M"
@@ -277,9 +273,7 @@ def test_corrupt_state_and_symlink_workspace_fail_closed(tmp_path: Path) -> None
     config.workspace.mkdir(mode=0o700)
     (config.workspace / "recovery-state.json").write_text("not-json", encoding="utf-8")
     with pytest.raises(ExportRecoveryError, match="unreadable"):
-        execute_recovery_export(
-            config, resources=_ample_resources, command_runner=FakeCommands()
-        )
+        execute_recovery_export(config, resources=_ample_resources, command_runner=FakeCommands())
 
     linked_workspace = tmp_path / "workspace-link"
     linked_workspace.symlink_to(config.workspace, target_is_directory=True)
@@ -314,12 +308,127 @@ def test_kaggle_notebook_is_recovery_only_and_resource_guarded() -> None:
     assert "SFTTrainer" not in code
     assert "INCUBUS_BASE_MODEL_PATH" in code
     assert "INCUBUS_ADAPTER_PATH" in code
+    assert '"--upload-repo", os.environ["INCUBUS_CHECKPOINT_LOCATION"]' in code
+    assert '"--upload-branch", os.environ["INCUBUS_CHECKPOINT_BRANCH"]' in code
     assert 're.fullmatch(r"[0-9a-f]{40}", revision)' in code
     assert code.index('revision = secrets.get_secret("INCUBUS_CODE_REVISION")') < code.index(
         "shutil.rmtree(repository, ignore_errors=True)"
     )
     assert code.index("shutil.rmtree(repository, ignore_errors=True)") < code.index(
-        "subprocess.run([\"git\", \"init\", str(repository)]"
+        'subprocess.run(["git", "init", str(repository)]'
     )
-    assert "git\", \"-C\", str(repository), \"rev-parse\", \"HEAD" in code
+    assert 'git", "-C", str(repository), "rev-parse", "HEAD' in code
     assert "checked_out != revision" in code
+    assert code.index('"uninstall", "-y", "torchvision", "torchaudio"') < code.index(
+        '"install", "--require-hashes"'
+    )
+    assert '"-e", str(repository)' not in code
+    assert 'runtime_environment["PYTHONPATH"]' in code
+    assert "env=runtime_environment" in code
+
+
+def test_recovery_lock_installs_the_adapter_merge_runtime() -> None:
+    requirements = Path("requirements/recovery.in").read_text(encoding="utf-8")
+
+    assert "peft==0.19.1" in requirements
+    assert "transformers==5.13.1" in requirements
+
+
+class FakePrivateCandidateStore:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def ensure_private(self, *, repo_id: str, branch: str) -> None:
+        self.calls.append(("ensure_private", {"repo_id": repo_id, "branch": branch}))
+
+    def upload_candidate(self, **kwargs: object) -> str:
+        self.calls.append(("upload_candidate", dict(kwargs)))
+        return "a" * 40
+
+    def verify_candidate(self, **kwargs: object) -> bool:
+        self.calls.append(("verify_candidate", dict(kwargs)))
+        return True
+
+    def upload_receipt(self, **kwargs: object) -> str:
+        self.calls.append(("upload_receipt", dict(kwargs)))
+        return "b" * 40
+
+    def verify_receipt(self, **kwargs: object) -> bool:
+        self.calls.append(("verify_receipt", dict(kwargs)))
+        return True
+
+
+def test_completed_candidate_is_uploaded_with_immutable_private_evidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    export = execute_recovery_export(
+        config, resources=_ample_resources, command_runner=FakeCommands()
+    )
+    store = FakePrivateCandidateStore()
+
+    uploaded = upload_private_candidate(
+        config=config,
+        result=export,
+        repo_id="metaflora/incubus-checkpoints",
+        branch="incubus-training-v1",
+        store=store,
+    )
+
+    assert isinstance(uploaded, PrivateCandidateUploadResult)
+    assert uploaded.artifact_revision == "a" * 40
+    assert uploaded.evidence_revision == "b" * 40
+    assert uploaded.remote_prefix == (
+        f"runs/{config.run_id}/exports/q5-k-m/{export.artifact_sha256}"
+    )
+    assert [name for name, _kwargs in store.calls] == [
+        "ensure_private",
+        "upload_candidate",
+        "verify_candidate",
+        "upload_receipt",
+        "verify_receipt",
+    ]
+    upload = store.calls[1][1]
+    assert upload["folder"] == config.workspace
+    assert upload["filenames"] == (
+        "candidate-export.json",
+        "candidate-sha256.txt",
+        "metaflora-incubus-v1.gguf",
+    )
+    assert str(upload["remote_prefix"]).endswith(export.artifact_sha256)
+    verification = store.calls[2][1]
+    assert verification["revision"] == "a" * 40
+    assert verification["artifact_sha256"] == export.artifact_sha256
+    assert verification["artifact_size_bytes"] == export.artifact_size_bytes
+    receipt = json.loads(uploaded.receipt.read_text(encoding="utf-8"))
+    assert receipt["artifact_revision"] == "a" * 40
+    assert receipt["artifact_sha256"] == export.artifact_sha256
+    assert receipt["release_ready"] is False
+    receipt_upload = store.calls[3][1]
+    assert receipt_upload["parent_revision"] == "a" * 40
+    assert receipt_upload["path_in_repo"] == (
+        "runs/incubus-v1-refine-001/exports/candidate-upload-receipt.json"
+    )
+    receipt_verification = store.calls[4][1]
+    assert receipt_verification["revision"] == "b" * 40
+    assert receipt_verification["expected_sha256"] == _sha(uploaded.receipt)
+
+
+def test_private_upload_fails_closed_if_remote_snapshot_cannot_be_verified(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    export = execute_recovery_export(
+        config, resources=_ample_resources, command_runner=FakeCommands()
+    )
+    store = FakePrivateCandidateStore()
+    store.verify_candidate = lambda **_kwargs: False  # type: ignore[method-assign]
+
+    with pytest.raises(ExportRecoveryError, match="verification"):
+        upload_private_candidate(
+            config=config,
+            result=export,
+            repo_id="metaflora/incubus-checkpoints",
+            branch="incubus-training-v1",
+            store=store,
+        )

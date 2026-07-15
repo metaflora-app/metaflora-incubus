@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
+
 from metaflora_incubus.training_contract import (
     CheckpointCompatibilityError,
     CheckpointRef,

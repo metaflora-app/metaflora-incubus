@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
+
 from metaflora_incubus.benchmark_harness import (
     BenchmarkProvenance,
     ProvenanceError,

@@ -55,9 +55,7 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def _read_jsonl(
-    path: Path, *, skip_malformed: bool = False
-) -> tuple[Mapping[str, object], ...]:
+def _read_jsonl(path: Path, *, skip_malformed: bool = False) -> tuple[Mapping[str, object], ...]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -75,9 +73,7 @@ def _read_jsonl(
                 f"invalid JSON in {path.name} at line {line_number}"
             ) from exc
         if not isinstance(record, Mapping):
-            raise TeacherAugmentationError(
-                f"invalid record in {path.name} at line {line_number}"
-            )
+            raise TeacherAugmentationError(f"invalid record in {path.name} at line {line_number}")
         records.append(record)
     return tuple(records)
 
@@ -166,46 +162,47 @@ def _reconstruct_prepared_records(
             if prompt != preference_prompt:
                 raise TeacherAugmentationError(f"prompt mismatch for record_id: {record_id}")
             candidate = {
-                    "record_id": record_id,
-                    "prompt": prompt,
-                    "response": _message_content(
-                        sft_record.get("messages"),
-                        context=f"{sft_name}:{record_id}",
-                        role="assistant",
-                    ),
-                    "chosen": _message_content(
-                        preference_record.get("chosen"),
-                        context=f"{preference_name}:{record_id}",
-                        role="assistant",
-                    ),
-                    "rejected": _message_content(
-                        preference_record.get("rejected"),
-                        context=f"{preference_name}:{record_id}",
-                        role="assistant",
-                    ),
-                    "capability": _required_string(
-                        provenance_record, "capability", context=f"provenance:{record_id}"
-                    ),
-                    "source_url": _required_string(
-                        provenance_record, "source_url", context=f"provenance:{record_id}"
-                    ),
-                    "source_revision": _required_string(
-                        provenance_record,
-                        "source_revision",
-                        context=f"provenance:{record_id}",
-                    ),
-                    "collected_at": _required_string(
-                        provenance_record, "collected_at", context=f"provenance:{record_id}"
-                    ),
-                    "license_id": _required_string(
-                        provenance_record, "license_id", context=f"provenance:{record_id}"
-                    ),
-                    "split": split,
-                }
-            private_text = _normalized_text("\n".join(
-                str(candidate[key])
-                for key in ("prompt", "response", "chosen", "rejected")
-            ))
+                "record_id": record_id,
+                "prompt": prompt,
+                "response": _message_content(
+                    sft_record.get("messages"),
+                    context=f"{sft_name}:{record_id}",
+                    role="assistant",
+                ),
+                "chosen": _message_content(
+                    preference_record.get("chosen"),
+                    context=f"{preference_name}:{record_id}",
+                    role="assistant",
+                ),
+                "rejected": _message_content(
+                    preference_record.get("rejected"),
+                    context=f"{preference_name}:{record_id}",
+                    role="assistant",
+                ),
+                "capability": _required_string(
+                    provenance_record, "capability", context=f"provenance:{record_id}"
+                ),
+                "source_url": _required_string(
+                    provenance_record, "source_url", context=f"provenance:{record_id}"
+                ),
+                "source_revision": _required_string(
+                    provenance_record,
+                    "source_revision",
+                    context=f"provenance:{record_id}",
+                ),
+                "collected_at": _required_string(
+                    provenance_record, "collected_at", context=f"provenance:{record_id}"
+                ),
+                "license_id": _required_string(
+                    provenance_record, "license_id", context=f"provenance:{record_id}"
+                ),
+                "split": split,
+            }
+            private_text = _normalized_text(
+                "\n".join(
+                    str(candidate[key]) for key in ("prompt", "response", "chosen", "rejected")
+                )
+            )
             if any(identifier in private_text for identifier in prohibited):
                 continue
             reconstructed.append(candidate)
