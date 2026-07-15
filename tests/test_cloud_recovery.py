@@ -15,6 +15,7 @@ from metaflora_incubus.cloud_training import (
 )
 from metaflora_incubus.cloud_training_runtime import (
     _authenticated_recovery_binding,
+    _cuda_cmake_arguments,
     _reusable_final_gguf,
     _write_checkpoint_manifest,
 )
@@ -170,6 +171,21 @@ def test_recovery_rejects_source_identity_drift(tmp_path: Path) -> None:
             checkpoint_key="k" * 32,
             run_id="incubus-v1-run",
         )
+
+
+def test_cuda_cmake_arguments_use_kaggle_compat_driver(tmp_path: Path) -> None:
+    driver = tmp_path / "compat" / "libcuda.so"
+    driver.parent.mkdir()
+    driver.write_bytes(b"driver")
+
+    arguments = _cuda_cmake_arguments(
+        cuda_enabled=True,
+        cuda_driver_path=driver,
+    )
+
+    assert "-DGGML_CUDA=ON" in arguments
+    assert f"-DCUDA_CUDA_LIBRARY={driver}" in arguments
+    assert _cuda_cmake_arguments(cuda_enabled=False) == ["-DGGML_CUDA=OFF"]
 
 
 def recovery_plan(tmp_path: Path) -> CloudExecutionPlan:

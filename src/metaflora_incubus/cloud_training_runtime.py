@@ -477,6 +477,20 @@ def preflight_training_text(
     return TextPreflightReport(checked, maximum, max_sequence_length)
 
 
+def _cuda_cmake_arguments(
+    *,
+    cuda_enabled: bool,
+    cuda_driver_path: Path | None = None,
+) -> list[str]:
+    arguments = [f"-DGGML_CUDA={'ON' if cuda_enabled else 'OFF'}"]
+    if not cuda_enabled:
+        return arguments
+    driver = cuda_driver_path or Path("/usr/local/cuda/compat/libcuda.so")
+    if driver.is_file():
+        arguments.append(f"-DCUDA_CUDA_LIBRARY={driver}")
+    return arguments
+
+
 def _build_gguf(
     *,
     plan: CloudExecutionPlan,
@@ -502,7 +516,7 @@ def _build_gguf(
             "-B",
             "build",
             "-DLLAMA_CURL=OFF",
-            f"-DGGML_CUDA={'ON' if cuda_enabled else 'OFF'}",
+            *_cuda_cmake_arguments(cuda_enabled=cuda_enabled),
             "-DBUILD_SHARED_LIBS=OFF",
         ],
         cwd=llama_cpp,
