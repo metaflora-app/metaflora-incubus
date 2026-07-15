@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import re
@@ -52,6 +53,73 @@ from metaflora_incubus.huggingface_publication import (
 CONFIG_PATH = Path("configs/cloud/free-gpu-v1.json")
 NOTEBOOK_PATH = Path("notebooks/metaflora-incubus-free-gpu.ipynb")
 ENCRYPTED_BOOTSTRAP_PATH = Path("configs/cloud/bootstrap-v1.enc")
+_RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "incubus_test_run_free_gpu", Path("scripts/run_free_gpu.py")
+)
+assert _RUNNER_SPEC is not None and _RUNNER_SPEC.loader is not None
+free_gpu_runner = importlib.util.module_from_spec(_RUNNER_SPEC)
+_RUNNER_SPEC.loader.exec_module(free_gpu_runner)
+
+
+@pytest.mark.parametrize("failure_stage", ("revision", "vram", "plan"))
+def test_runner_reports_every_early_execution_failure_after_argument_parsing(
+    monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    class EarlyFailure(RuntimeError):
+        pass
+
+    captured: dict[str, object] = {}
+
+    def reporting_boundary(operation, **kwargs):
+        captured.update(kwargs)
+        return operation()
+
+    monkeypatch.setattr(free_gpu_runner, "run_with_failure_reporting", reporting_boundary)
+    monkeypatch.setattr(free_gpu_runner, "detect_code_revision", lambda: "a" * 40)
+    monkeypatch.setattr(free_gpu_runner, "detect_vram_bytes", lambda: 16 * 1024**3)
+    if failure_stage == "revision":
+        monkeypatch.setattr(
+            free_gpu_runner,
+            "detect_code_revision",
+            lambda: (_ for _ in ()).throw(EarlyFailure("revision failed")),
+        )
+    elif failure_stage == "vram":
+        monkeypatch.setattr(
+            free_gpu_runner,
+            "detect_vram_bytes",
+            lambda: (_ for _ in ()).throw(EarlyFailure("vram failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            free_gpu_runner.CloudExecutionPlan,
+            "create",
+            lambda **kwargs: (_ for _ in ()).throw(EarlyFailure("plan failed")),
+        )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_free_gpu.py",
+            "--execute",
+            "--run-id",
+            "incubus-v1-run",
+            "--parameter-count",
+            "4659865088",
+            "--checkpoint-backend",
+            "hf_private_branch",
+            "--checkpoint-location",
+            "private-owner/private-checkpoints",
+            "--checkpoint-branch",
+            "incubus-training-v1",
+        ],
+    )
+
+    with pytest.raises(EarlyFailure, match=failure_stage):
+        free_gpu_runner.main()
+
+    assert captured["run_id"] == "incubus-v1-run"
+    assert captured["phase"] == "post-bootstrap-execution"
+    assert captured["code_revision"] == ("unknown" if failure_stage == "revision" else "a" * 40)
 
 
 def test_free_gpu_profile_is_honest_about_t4_and_rejects_nine_billion_parameters() -> None:
