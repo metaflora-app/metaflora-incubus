@@ -126,6 +126,7 @@ class CloudExecutionPlan:
     local_retention: bool
     resume_enabled: bool
     training_mode: str
+    parent_run_id: str | None
     final_gguf_quantization: str
     post_training_steps: tuple[str, ...]
 
@@ -151,6 +152,7 @@ class CloudExecutionPlan:
             local_retention=False,
             resume_enabled=True,
             training_mode="qlora_nf4",
+            parent_run_id=None,
             final_gguf_quantization=config.profile.final_gguf_quantization,
             post_training_steps=(
                 "convert_base_to_f16_gguf",
@@ -186,6 +188,7 @@ class CloudExecutionPlan:
             local_retention=False,
             resume_enabled=True,
             training_mode="recovery_only_cpu",
+            parent_run_id=None,
             final_gguf_quantization=config.profile.final_gguf_quantization,
             post_training_steps=(
                 "convert_base_to_f16_gguf",
@@ -193,6 +196,48 @@ class CloudExecutionPlan:
                 "merge_gguf_in_cloud",
                 "quantize_q5_k_m",
                 "run_candidate_benchmark_cpu",
+                "sync_private_evidence",
+                "delete_ephemeral_workspace",
+            ),
+        )
+
+    @classmethod
+    def create_refinement(
+        cls,
+        *,
+        config: CloudConfig,
+        checkpoint_target: RemoteCheckpointTarget,
+        run_id: str,
+        parent_run_id: str,
+        parameter_count: int,
+        vram_bytes: int,
+    ) -> CloudExecutionPlan:
+        """Create a child DPO-only run without mutating its authenticated parent."""
+
+        if not _RUN_ID.fullmatch(run_id) or not _RUN_ID.fullmatch(parent_run_id):
+            raise CloudConstraintError("invalid refinement run identity")
+        if run_id == parent_run_id:
+            raise CloudConstraintError("refinement run must differ from its parent")
+        config.profile.validate(parameter_count=parameter_count, vram_bytes=vram_bytes)
+        return cls(
+            config=config,
+            checkpoint_target=checkpoint_target,
+            run_id=run_id,
+            parameter_count=parameter_count,
+            workspace=config.workspace / run_id,
+            local_retention=False,
+            resume_enabled=True,
+            training_mode="dpo_refinement",
+            parent_run_id=parent_run_id,
+            final_gguf_quantization=config.profile.final_gguf_quantization,
+            post_training_steps=(
+                "restore_authenticated_parent_adapter",
+                "preference_refinement",
+                "convert_base_to_f16_gguf",
+                "convert_adapter_to_gguf",
+                "merge_gguf_in_cloud",
+                "quantize_q5_k_m",
+                "run_candidate_benchmark",
                 "sync_private_evidence",
                 "delete_ephemeral_workspace",
             ),
@@ -418,6 +463,18 @@ class HuggingFacePrivateCheckpointStore:
                 f"{prefix}/incubus-checkpoint-manifest.json",
                 f"{prefix}/final-adapter/**",
                 f"{prefix}/artifacts/**",
+            ),
+        )
+
+    def restore_parent_adapter(self, destination: Path) -> Path | None:
+        """Restore only signed lineage metadata and the immutable parent adapter."""
+
+        prefix = f"runs/{self._run_id}"
+        return self._restore_with_patterns(
+            destination,
+            allow_patterns=(
+                f"{prefix}/incubus-checkpoint-manifest.json",
+                f"{prefix}/final-adapter/**",
             ),
         )
 

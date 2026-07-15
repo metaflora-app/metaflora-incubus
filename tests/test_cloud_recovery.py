@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from metaflora_incubus.cloud_training import (
     load_cloud_config,
 )
 from metaflora_incubus.cloud_training_runtime import (
+    _authenticated_parent_binding,
     _authenticated_recovery_binding,
     _cuda_cmake_arguments,
     _native_build_jobs,
@@ -174,6 +176,68 @@ def test_recovery_rejects_source_identity_drift(tmp_path: Path) -> None:
         )
 
 
+def test_refinement_accepts_authenticated_parent_with_an_older_dataset(tmp_path: Path) -> None:
+    root = signed_checkpoint(tmp_path)
+    environment = {
+        **recovery_environment(),
+        "INCUBUS_DATASET_REVISION": "9" * 40,
+        "INCUBUS_DATASET_SHA256": "8" * 64,
+    }
+
+    binding = _authenticated_parent_binding(
+        root,
+        environment=environment,
+        checkpoint_key="k" * 32,
+        parent_run_id="incubus-v1-run",
+    )
+
+    assert binding["dataset_revision"] == "2" * 40
+    assert (root / "final-adapter" / "adapter_model.safetensors").is_file()
+
+
+def test_refinement_verifies_adapter_only_subset_of_parent_with_artifacts(tmp_path: Path) -> None:
+    full = signed_checkpoint(tmp_path / "full")
+    (full / "final-adapter" / "adapter_config.json").write_text("{}\n")
+    artifacts = full / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "model.gguf").write_bytes(b"large release artifact")
+    _write_checkpoint_manifest(full, binding=checkpoint_binding(), key="k" * 32)
+    subset = tmp_path / "subset"
+    shutil.copytree(full / "final-adapter", subset / "final-adapter")
+    shutil.copy2(full / "incubus-checkpoint-manifest.json", subset)
+
+    binding = _authenticated_parent_binding(
+        subset,
+        environment=recovery_environment(),
+        checkpoint_key="k" * 32,
+        parent_run_id="incubus-v1-run",
+    )
+
+    assert binding["run_id"] == "incubus-v1-run"
+
+    (subset / "final-adapter" / "adapter_config.json").unlink()
+    with pytest.raises(CloudConstraintError, match="incomplete"):
+        _authenticated_parent_binding(
+            subset,
+            environment=recovery_environment(),
+            checkpoint_key="k" * 32,
+            parent_run_id="incubus-v1-run",
+        )
+
+
+def test_refinement_rejects_parent_source_drift(tmp_path: Path) -> None:
+    root = signed_checkpoint(tmp_path)
+    environment = {**recovery_environment(), "INCUBUS_SOURCE_REVISION": "7" * 40}
+
+    with pytest.raises(CloudConstraintError, match="parent source revision"):
+        _authenticated_parent_binding(
+            root,
+            environment=environment,
+            checkpoint_key="k" * 32,
+            parent_run_id="incubus-v1-run",
+        )
+
+
 def test_cuda_cmake_arguments_use_kaggle_compat_driver(tmp_path: Path) -> None:
     driver = tmp_path / "compat" / "libcuda.so"
     driver.parent.mkdir()
@@ -212,6 +276,29 @@ def recovery_plan(tmp_path: Path) -> CloudExecutionPlan:
         vram_bytes=16 * GIB,
     )
     return plan
+
+
+def test_refinement_plan_is_dpo_only_and_keeps_parent_immutable() -> None:
+    config = load_cloud_config(Path("configs/cloud/free-gpu-v1.json"))
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="metaflora/incubus-checkpoints",
+        branch="incubus-training-v1",
+    )
+
+    plan = CloudExecutionPlan.create_refinement(
+        config=config,
+        checkpoint_target=target,
+        run_id="incubus-v1-refine-001",
+        parent_run_id="incubus-v1-run",
+        parameter_count=4_659_865_088,
+        vram_bytes=16 * GIB,
+    )
+
+    assert plan.training_mode == "dpo_refinement"
+    assert plan.parent_run_id == "incubus-v1-run"
+    assert "sft" not in plan.post_training_steps
+    assert plan.workspace.name == "incubus-v1-refine-001"
 
 
 def test_cpu_recovery_plan_validates_parameter_limit_without_weakening_gpu_plan() -> None:

@@ -8,6 +8,7 @@ import pytest
 from metaflora_incubus.cloud_training_runtime import (
     CloudConstraintError,
     preflight_training_text,
+    require_benchmark_isolation,
 )
 
 
@@ -84,3 +85,12 @@ def test_text_preflight_rejects_missing_template_and_overlong_or_malformed_rows(
             dataset_root=tmp_path,
             max_sequence_length=64,
         )
+
+
+def test_runtime_rejects_preference_prompt_from_release_benchmark(tmp_path: Path) -> None:
+    build_surfaces(tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    write_jsonl(cases, ({"case_id": "one", "prompt": "word word"},))
+
+    with pytest.raises(CloudConstraintError, match="overlaps"):
+        require_benchmark_isolation(dataset_root=tmp_path, cases_path=cases)

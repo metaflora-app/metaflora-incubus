@@ -75,7 +75,8 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
     final = _build_gguf(plan=plan, source=source, adapter=adapter, artifacts=artifacts)
 
     assert final.name == "metaflora-incubus-v1.gguf"
-    assert [
+    build_command = next(command for command in commands if command[:2] == ["cmake", "--build"])
+    assert build_command[:-1] == [
         "cmake",
         "--build",
         "build",
@@ -85,8 +86,8 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
         "llama-server",
         "llama-export-lora",
         "llama-quantize",
-        "-j1",
-    ] in commands
+    ]
+    assert build_command[-1] in {"-j1", "-j2", "-j3", "-j4"}
     assert [
         "cmake",
         "-B",

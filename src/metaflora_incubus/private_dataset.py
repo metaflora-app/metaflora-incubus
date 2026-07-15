@@ -20,6 +20,7 @@ DATASET_BUNDLE_FILES = (
     "provenance.jsonl",
 )
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
+_AUTOMATIC_HUB_FILES = frozenset({".gitattributes"})
 
 
 class PrivateDatasetError(ValueError):
@@ -68,6 +69,14 @@ def _dataset_sha256(bundle: Path) -> str:
     return value
 
 
+def _remote_bundle_names_are_valid(names: object) -> bool:
+    try:
+        remote_names = set(names)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    return remote_names - _AUTOMATIC_HUB_FILES == set(DATASET_BUNDLE_FILES)
+
+
 def publish_private_dataset_bundle(
     *, bundle: Path, repo_id: str, uploader: PrivateDatasetUploader
 ) -> PrivateDatasetPublication:
@@ -87,6 +96,7 @@ def publish_private_dataset_bundle(
     remote = uploader.snapshot(repo_id=normalized_repo, revision=revision)
     if remote != before:
         raise PrivateDatasetError("private dataset read-back verification failed")
+    uploader.ensure_private_dataset(repo_id=normalized_repo)
     return PrivateDatasetPublication(
         revision=revision,
         dataset_sha256=dataset_sha,
@@ -135,7 +145,7 @@ class HuggingFacePrivateDatasetUploader:
             repo_type="dataset",
             revision=revision,
         )
-        if set(names) != set(DATASET_BUNDLE_FILES):
+        if not _remote_bundle_names_are_valid(names):
             return {}
         return {
             name: Path(

@@ -10,6 +10,7 @@ import pytest
 from metaflora_incubus.private_dataset import (
     DATASET_BUNDLE_FILES,
     PrivateDatasetError,
+    _remote_bundle_names_are_valid,
     publish_private_dataset_bundle,
 )
 
@@ -95,9 +96,22 @@ def test_private_bundle_upload_returns_exact_commit_and_verifies_remote_bytes(
     assert result.dataset_sha256 == dataset_sha
     assert result.verified is True
     assert result.repo_id_sha256 == hashlib.sha256(b"private-owner/incubus-data").hexdigest()
-    assert [name for name, _value in uploader.calls] == ["ensure", "upload", "snapshot"]
+    assert [name for name, _value in uploader.calls] == [
+        "ensure",
+        "upload",
+        "snapshot",
+        "ensure",
+    ]
     with pytest.raises(FrozenInstanceError):
         result.revision = "b" * 40  # type: ignore[misc]
+
+
+def test_hub_snapshot_allows_only_automatic_gitattributes_metadata() -> None:
+    expected = set(DATASET_BUNDLE_FILES)
+
+    assert _remote_bundle_names_are_valid((*expected, ".gitattributes"))
+    assert _remote_bundle_names_are_valid(expected)
+    assert not _remote_bundle_names_are_valid((*expected, "README.md"))
 
 
 def test_private_upload_fails_closed_for_public_repo_bad_revision_and_remote_drift(

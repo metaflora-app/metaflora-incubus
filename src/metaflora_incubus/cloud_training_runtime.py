@@ -187,6 +187,38 @@ def _verify_checkpoint_manifest(
         raise CloudConstraintError("checkpoint integrity authentication failed")
 
 
+def _verify_checkpoint_subset(
+    root: Path, *, binding: Mapping[str, str], key: str
+) -> Mapping[str, str]:
+    """Verify downloaded parent files against an HMAC-authenticated complete manifest."""
+
+    try:
+        document = json.loads((root / _CHECKPOINT_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CloudConstraintError("checkpoint subset manifest is invalid") from exc
+    recorded = document.get("files")
+    if document.get("schema_version") != 1 or document.get("binding") != dict(binding):
+        raise CloudConstraintError("checkpoint subset binding does not match")
+    if not isinstance(recorded, dict) or not all(
+        isinstance(name, str) and isinstance(digest, str) for name, digest in recorded.items()
+    ):
+        raise CloudConstraintError("checkpoint subset file map is invalid")
+    payload = _checkpoint_payload(binding=binding, files=recorded)
+    expected = hmac.new(_checkpoint_key(key), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(str(document.get("hmac_sha256", "")), expected):
+        raise CloudConstraintError("checkpoint subset authentication failed")
+    actual = _checkpoint_file_hashes(root)
+    if not actual or any(recorded.get(name) != digest for name, digest in actual.items()):
+        raise CloudConstraintError("checkpoint subset integrity verification failed")
+    recorded_adapter = {name for name in recorded if name.startswith("final-adapter/")}
+    actual_adapter = {name for name in actual if name.startswith("final-adapter/")}
+    if recorded_adapter != actual_adapter:
+        raise CloudConstraintError("checkpoint parent adapter subset is incomplete")
+    if not any(name.endswith(".safetensors") for name in actual_adapter):
+        raise CloudConstraintError("checkpoint subset has no parent adapter")
+    return actual
+
+
 def _authenticated_recovery_binding(
     root: Path,
     *,
@@ -233,6 +265,41 @@ def _authenticated_recovery_binding(
     }
     if any(authenticated.get(name) != value for name, value in expected_dataset_values.items()):
         raise CloudConstraintError("checkpoint recovery dataset binding does not match")
+    return authenticated
+
+
+def _authenticated_parent_binding(
+    root: Path,
+    *,
+    environment: Mapping[str, str],
+    checkpoint_key: str,
+    parent_run_id: str,
+) -> dict[str, str]:
+    """Authenticate an immutable parent adapter while allowing a new child dataset."""
+
+    try:
+        document = json.loads((root / _CHECKPOINT_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CloudConstraintError("parent checkpoint manifest is invalid") from exc
+    binding = document.get("binding")
+    if not isinstance(binding, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in binding.items()
+    ):
+        raise CloudConstraintError("parent checkpoint binding is invalid")
+    authenticated = dict(binding)
+    _verify_checkpoint_subset(root, binding=authenticated, key=checkpoint_key)
+    if authenticated.get("run_id") != parent_run_id:
+        raise CloudConstraintError("parent run identity does not match")
+    source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
+    expected_source_hash = hashlib.sha256(source_repo.encode()).hexdigest()
+    if authenticated.get("source_repo_sha256") != expected_source_hash:
+        raise CloudConstraintError("parent source identity does not match")
+    source_revision = _required_revision(environment, "INCUBUS_SOURCE_REVISION")
+    if authenticated.get("source_revision") != source_revision:
+        raise CloudConstraintError("parent source revision does not match")
+    adapter = root / "final-adapter"
+    if not adapter.is_dir() or not any(adapter.glob("*.safetensors")):
+        raise CloudConstraintError("authenticated parent adapter is missing")
     return authenticated
 
 
@@ -314,10 +381,22 @@ def _require_cached_huggingface_auth() -> None:
         raise CloudConstraintError("cached Hugging Face identity is invalid")
 
 
-def _checkpoint_store(plan: CloudExecutionPlan):
+def _require_private_dataset(repo_id: str) -> None:
+    from huggingface_hub import HfApi
+
+    try:
+        info = HfApi(token=None).dataset_info(repo_id=repo_id)
+    except Exception as exc:
+        raise CloudConstraintError("private training dataset lookup failed") from exc
+    if info.private is not True:
+        raise CloudConstraintError("training dataset repository must remain private")
+
+
+def _checkpoint_store(plan: CloudExecutionPlan, *, run_id: str | None = None):
+    selected_run_id = run_id or plan.run_id
     if plan.checkpoint_target.backend is CheckpointBackend.GOOGLE_DRIVE:
-        return GoogleDriveCheckpointStore(plan.checkpoint_target, plan.run_id)
-    return HuggingFacePrivateCheckpointStore(plan.checkpoint_target, plan.run_id)
+        return GoogleDriveCheckpointStore(plan.checkpoint_target, selected_run_id)
+    return HuggingFacePrivateCheckpointStore(plan.checkpoint_target, selected_run_id)
 
 
 def _prepare_ephemeral_workspace(
@@ -330,6 +409,22 @@ def _prepare_ephemeral_workspace(
 ) -> Path | None:
     """Reset only this run's ephemeral directory, then restore authenticated state."""
 
+    _reset_ephemeral_workspace(plan)
+    if before_restore is not None:
+        before_restore()
+    checkpoint_root = plan.workspace / "checkpoints"
+    restored = store.restore(checkpoint_root)
+    if restored is not None:
+        _verify_checkpoint_manifest(
+            restored,
+            binding=binding,
+            key=checkpoint_key,
+            allow_prunable_training_files=True,
+        )
+    return restored
+
+
+def _reset_ephemeral_workspace(plan: CloudExecutionPlan) -> None:
     if plan.config.workspace.is_symlink() or plan.workspace.is_symlink():
         raise CloudConstraintError("refusing symlinked ephemeral workspace")
     if plan.workspace != plan.config.workspace / plan.run_id:
@@ -338,14 +433,15 @@ def _prepare_ephemeral_workspace(
     if plan.workspace.exists() or plan.workspace.is_symlink():
         safe_ephemeral_cleanup(plan)
     plan.workspace.mkdir(parents=False, exist_ok=False)
-    if before_restore is not None:
-        before_restore()
-    checkpoint_root = plan.workspace / "checkpoints"
-    restore = getattr(store, "restore_recovery", store.restore)
-    restored = restore(checkpoint_root)
-    if restored is not None:
-        _verify_checkpoint_manifest(restored, binding=binding, key=checkpoint_key)
-    return restored
+
+
+def _validate_refinement_disk(plan: CloudExecutionPlan) -> None:
+    minimum = 12 * 1024**3
+    available = _available_workspace_bytes(plan)
+    if available < minimum:
+        raise CloudConstraintError(
+            f"refinement disk preflight failed: need {minimum} bytes, found {available} bytes"
+        )
 
 
 def _available_workspace_bytes(plan: CloudExecutionPlan) -> int:
@@ -475,6 +571,35 @@ def preflight_training_text(
             maximum = max(maximum, row_maximum)
             checked += 1
     return TextPreflightReport(checked, maximum, max_sequence_length)
+
+
+def require_benchmark_isolation(*, dataset_root: Path, cases_path: Path) -> None:
+    """Reject preference prompts that overlap the committed release benchmark."""
+
+    from metaflora_incubus.teacher_augmentation import _normalized_text
+
+    try:
+        benchmark_rows = _read_json_lines(cases_path)
+        preference_rows = (
+            *_read_json_lines(dataset_root / "preference.jsonl"),
+            *_read_json_lines(dataset_root / "preference_validation.jsonl"),
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CloudConstraintError("benchmark isolation inputs are invalid") from exc
+    benchmark_prompts = {
+        _normalized_text(str(row.get("prompt", ""))) for row in benchmark_rows
+    }
+    for row in preference_rows:
+        prompt = _message_list(row, "prompt")[0]["content"]
+        if _normalized_text(prompt) in benchmark_prompts:
+            raise CloudConstraintError("training dataset overlaps the release benchmark")
+
+
+def _read_json_lines(path: Path) -> tuple[dict[str, object], ...]:
+    rows = tuple(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line)
+    if not all(isinstance(row, dict) for row in rows):
+        raise CloudConstraintError("JSONL surface contains a non-object record")
+    return rows
 
 
 def _cuda_cmake_arguments(
@@ -827,16 +952,59 @@ def execute_training_and_build(
         "source_revision": source_revision,
     }
     _require_cached_huggingface_auth()
+    _require_private_dataset(dataset_repo)
     store = _checkpoint_store(plan)
-    restored = _prepare_ephemeral_workspace(
-        plan=plan,
-        store=store,
-        binding=binding,
-        checkpoint_key=checkpoint_key,
-        before_restore=lambda: validate_cloud_disk_preflight(
-            plan, available_bytes=_available_workspace_bytes(plan)
-        ),
-    )
+    parent_adapter: Path | None = None
+    if plan.parent_run_id is not None:
+        _reset_ephemeral_workspace(plan)
+        _validate_refinement_disk(plan)
+        parent_root = plan.workspace / "parent-checkpoint"
+        parent_store = _checkpoint_store(plan, run_id=plan.parent_run_id)
+        restore_parent = getattr(parent_store, "restore_parent_adapter", parent_store.restore)
+        restored_parent = restore_parent(parent_root)
+        if restored_parent is None:
+            raise CloudConstraintError("authenticated parent checkpoint is missing")
+        _authenticated_parent_binding(
+            restored_parent,
+            environment=environment,
+            checkpoint_key=checkpoint_key,
+            parent_run_id=plan.parent_run_id,
+        )
+        parent_files = {
+            name: digest
+            for name, digest in _checkpoint_file_hashes(restored_parent).items()
+            if name.startswith("final-adapter/")
+        }
+        binding = {
+            **binding,
+            "parent_adapter_sha256": hashlib.sha256(
+                json.dumps(parent_files, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "parent_manifest_sha256": _sha256_file(
+                restored_parent / _CHECKPOINT_MANIFEST
+            ),
+            "parent_run_id": plan.parent_run_id,
+        }
+        parent_adapter = restored_parent / "final-adapter"
+        checkpoint_root = plan.workspace / "checkpoints"
+        restored = store.restore(checkpoint_root)
+        if restored is not None:
+            _verify_checkpoint_manifest(
+                restored,
+                binding=binding,
+                key=checkpoint_key,
+                allow_prunable_training_files=True,
+            )
+    else:
+        restored = _prepare_ephemeral_workspace(
+            plan=plan,
+            store=store,
+            binding=binding,
+            checkpoint_key=checkpoint_key,
+            before_restore=lambda: validate_cloud_disk_preflight(
+                plan, available_bytes=_available_workspace_bytes(plan)
+            ),
+        )
     source = plan.workspace / "source"
     data = plan.workspace / "data"
     snapshot_download(
@@ -865,6 +1033,10 @@ def execute_training_and_build(
     from metaflora_incubus.training_entrypoints import _load_dataset_manifest
 
     _load_dataset_manifest(data / "manifest.json", dataset_sha)
+    require_benchmark_isolation(
+        dataset_root=data,
+        cases_path=Path(__file__).resolve().parents[2] / "benchmarks" / "gguf-v1-cases.jsonl",
+    )
     checkpoint_root = plan.workspace / "checkpoints"
 
     def sync_checkpoints() -> None:
@@ -932,6 +1104,9 @@ def execute_training_and_build(
     if preference_resume is not None:
         model = PeftModel.from_pretrained(model, str(preference_resume), is_trainable=True)
         sft = None
+    elif parent_adapter is not None:
+        model = PeftModel.from_pretrained(model, str(parent_adapter), is_trainable=True)
+        sft = None
     else:
         sft = SFTTrainer(
             model=model,
@@ -968,33 +1143,35 @@ def execute_training_and_build(
         sft = None
         gc.collect()
         torch.cuda.empty_cache()
+    refinement = parent_adapter is not None
+    preference_seed = 1703 if refinement else 1702
     preference = DPOTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=_mixed_dataset(
-            load_dataset, interleave_datasets, data / "preference.jsonl", 1702
+            load_dataset, interleave_datasets, data / "preference.jsonl", preference_seed
         ),
         eval_dataset=_mixed_dataset(
             load_dataset,
             interleave_datasets,
             data / "preference_validation.jsonl",
-            1702,
+            preference_seed,
         ),
         callbacks=[callback],
         args=DPOConfig(
             output_dir=str(preference_output),
             max_length=training_length,
-            max_steps=12,
-            save_steps=3,
+            max_steps=8 if refinement else 12,
+            save_steps=4 if refinement else 3,
             save_total_limit=2,
             per_device_train_batch_size=1,
             gradient_accumulation_steps=2,
-            learning_rate=5e-6,
+            learning_rate=2e-6 if refinement else 5e-6,
             fp16=True,
             gradient_checkpointing=True,
             report_to="none",
-            seed=1702,
-            data_seed=1702,
+            seed=preference_seed,
+            data_seed=preference_seed,
         ),
     )
     _cast_trainable_parameters_to_fp32(preference.model, torch_module=torch)
@@ -1002,6 +1179,19 @@ def execute_training_and_build(
     adapter = checkpoint_root / "final-adapter"
     preference.save_model(str(adapter))
     sync_checkpoints()
+    if refinement:
+        del model, sft, preference
+        torch.cuda.empty_cache()
+        result = {
+            "checkpoint_remote": True,
+            "parent_run_id": plan.parent_run_id,
+            "product_id": plan.config.product_id,
+            "public_upload": "blocked_until_eval_gates",
+            "refinement_complete": True,
+            "requires_authenticated_export": True,
+        }
+        safe_ephemeral_cleanup(plan)
+        return result
     del model, sft, preference
     torch.cuda.empty_cache()
     with _hidden_huggingface_credentials(Path.home()):

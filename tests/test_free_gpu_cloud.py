@@ -112,6 +112,8 @@ def test_runner_reports_every_early_execution_failure_after_argument_parsing(
         "argv",
         [
             "run_free_gpu.py",
+            "--mode",
+            "train",
             "--execute",
             "--run-id",
             "incubus-v1-run",
@@ -607,11 +609,11 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert "max_steps=32" in source
     assert "save_steps=8" in source
     assert "gradient_accumulation_steps=4" in source
-    assert "max_steps=12" in source
-    assert "save_steps=3" in source
+    assert "max_steps=8 if refinement else 12" in source
+    assert "save_steps=4 if refinement else 3" in source
     assert "gradient_accumulation_steps=2" in source
     assert source.count("save_total_limit=2") == 2
-    assert "learning_rate=5e-6" in source
+    assert "learning_rate=2e-6 if refinement else 5e-6" in source
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
     assert source.count("_cast_trainable_parameters_to_fp32(") == 3

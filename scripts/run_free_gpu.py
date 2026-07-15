@@ -50,7 +50,9 @@ def detect_code_revision() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Metaflora Incubus free GPU runner")
     parser.add_argument("--config", default="configs/cloud/free-gpu-v1.json")
+    parser.add_argument("--mode", choices=("train", "refine"), required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--parent-run-id")
     parser.add_argument("--parameter-count", required=True, type=int)
     parser.add_argument(
         "--checkpoint-backend",
@@ -61,6 +63,8 @@ def main() -> int:
     parser.add_argument("--checkpoint-branch")
     parser.add_argument("--execute", action="store_true")
     arguments = parser.parse_args()
+    if (arguments.mode == "refine") != bool(arguments.parent_run_id):
+        parser.error("refine mode requires --parent-run-id; train mode forbids it")
 
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend(arguments.checkpoint_backend),
@@ -92,12 +96,20 @@ def main() -> int:
 
     def execute() -> dict[str, object] | None:
         config = load_cloud_config(Path(arguments.config))
-        plan = CloudExecutionPlan.create(
-            config=config,
-            checkpoint_target=target,
-            run_id=arguments.run_id,
-            parameter_count=arguments.parameter_count,
-            vram_bytes=detect_vram_bytes(),
+        plan_arguments = {
+            "config": config,
+            "checkpoint_target": target,
+            "run_id": arguments.run_id,
+            "parameter_count": arguments.parameter_count,
+            "vram_bytes": detect_vram_bytes(),
+        }
+        plan = (
+            CloudExecutionPlan.create_refinement(
+                **plan_arguments,
+                parent_run_id=arguments.parent_run_id,
+            )
+            if arguments.mode == "refine"
+            else CloudExecutionPlan.create(**plan_arguments)
         )
         summary = {
             "local_retention": plan.local_retention,
