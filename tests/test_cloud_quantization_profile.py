@@ -61,7 +61,7 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
             output = Path(command[-2])
             output.touch()
             with output.open("r+b") as handle:
-                handle.truncate(3 * GIB)
+                handle.truncate(5 * GIB // 2)
 
     monkeypatch.setattr(
         "metaflora_incubus.cloud_training_runtime._checkout_pinned_revision",
@@ -72,5 +72,17 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
     final = _build_gguf(plan=plan, source=source, adapter=adapter, artifacts=artifacts)
 
     assert final.name == "metaflora-incubus-v1.gguf"
+    assert [
+        "cmake",
+        "--build",
+        "build",
+        "--config",
+        "Release",
+        "--target",
+        "llama-server",
+        "llama-export-lora",
+        "llama-quantize",
+        "-j2",
+    ] in commands
     assert any(command[-1] == "Q5_K_M" for command in commands)
     assert not any(command[-1] == "Q4_K_M" for command in commands)
