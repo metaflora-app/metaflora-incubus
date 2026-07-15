@@ -68,6 +68,9 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert "INCUBUS_CANDIDATE_GGUF" not in raw
     assert "INCUBUS_INCUMBENT_GGUF" not in raw
     assert "INCUBUS_LLAMA_SERVER" not in raw
+    assert "UserSecretsClient" not in raw
+    assert "/kaggle/input/incubus-private-runtime-bootstrap/bootstrap-key.txt" in raw
+    assert 'code_revision = "7ec9bcd46001b0ecd8d15e83203835f06dca59ea"' in raw
 
 
 def test_notebook_verifies_restored_receipts_and_builds_server_as_fallback() -> None:
