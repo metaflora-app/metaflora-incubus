@@ -123,6 +123,29 @@ def test_recovery_allows_pruned_signed_training_checkpoints(tmp_path: Path) -> N
     assert binding["run_id"] == "incubus-v1-run"
 
 
+def test_recovery_allows_pruned_signed_training_stage_outputs(tmp_path: Path) -> None:
+    root = signed_checkpoint(tmp_path)
+    stage_readme = root / "sft" / "README.md"
+    stage_adapter = root / "sft" / "final" / "adapter_model.safetensors"
+    stage_adapter.parent.mkdir(parents=True)
+    stage_readme.write_text("temporary stage output", encoding="utf-8")
+    stage_adapter.write_bytes(b"temporary adapter")
+    _write_checkpoint_manifest(root, binding=checkpoint_binding(), key="k" * 32)
+    stage_adapter.unlink()
+    stage_adapter.parent.rmdir()
+    stage_readme.unlink()
+    stage_readme.parent.rmdir()
+
+    binding = _authenticated_recovery_binding(
+        root,
+        environment=recovery_environment(),
+        checkpoint_key="k" * 32,
+        run_id="incubus-v1-run",
+    )
+
+    assert binding["run_id"] == "incubus-v1-run"
+
+
 def test_recovery_rejects_untracked_final_adapter_file(tmp_path: Path) -> None:
     root = signed_checkpoint(tmp_path)
     (root / "final-adapter" / "adapter_config.json").write_text("{}", encoding="utf-8")

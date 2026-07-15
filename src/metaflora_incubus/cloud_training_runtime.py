@@ -91,10 +91,15 @@ def _cast_trainable_parameters_to_fp32(model, *, torch_module) -> None:
 
 _CHECKPOINT_MANIFEST = "incubus-checkpoint-manifest.json"
 _TRAINING_CHECKPOINT_FILE = re.compile(r"(?:sft|preference)/checkpoint-[0-9]+/.+")
+_TRAINING_STAGE_FILE = re.compile(r"(?:sft|preference)/.+")
 
 
 def _is_prunable_training_file(name: str) -> bool:
     return _TRAINING_CHECKPOINT_FILE.fullmatch(name) is not None
+
+
+def _is_missing_pruned_training_file(name: str) -> bool:
+    return _TRAINING_STAGE_FILE.fullmatch(name) is not None
 
 
 def _checkpoint_file_hashes(root: Path) -> dict[str, str]:
@@ -162,7 +167,7 @@ def _verify_checkpoint_manifest(
     missing = set(recorded_files).difference(actual_files)
     if missing and (
         not allow_prunable_training_files
-        or any(not _is_prunable_training_file(name) for name in missing)
+        or any(not _is_missing_pruned_training_file(name) for name in missing)
     ):
         raise CloudConstraintError("checkpoint integrity verification failed")
     if any(
