@@ -153,6 +153,51 @@ def _verify_checkpoint_manifest(root: Path, *, binding: Mapping[str, str], key: 
         raise CloudConstraintError("checkpoint integrity authentication failed")
 
 
+def _authenticated_recovery_binding(
+    root: Path,
+    *,
+    environment: Mapping[str, str],
+    checkpoint_key: str,
+    run_id: str,
+) -> dict[str, str]:
+    """Authenticate a completed checkpoint while allowing recovery-code upgrades."""
+
+    try:
+        document = json.loads((root / _CHECKPOINT_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CloudConstraintError("checkpoint integrity manifest is invalid") from exc
+    binding = document.get("binding")
+    if not isinstance(binding, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in binding.items()
+    ):
+        raise CloudConstraintError("checkpoint recovery binding is invalid")
+    authenticated = dict(binding)
+    _verify_checkpoint_manifest(root, binding=authenticated, key=checkpoint_key)
+    if authenticated.get("run_id") != run_id:
+        raise CloudConstraintError("checkpoint recovery run identity does not match")
+    source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
+    if authenticated.get("source_repo_sha256") != hashlib.sha256(
+        source_repo.encode()
+    ).hexdigest():
+        raise CloudConstraintError("checkpoint recovery source identity does not match")
+    if authenticated.get("source_revision") != _required_revision(
+        environment, "INCUBUS_SOURCE_REVISION"
+    ):
+        raise CloudConstraintError("checkpoint recovery source revision does not match")
+    dataset_repo = _required(environment, "INCUBUS_DATASET_REPO")
+    if authenticated.get("dataset_repo_sha256") != hashlib.sha256(
+        dataset_repo.encode()
+    ).hexdigest():
+        raise CloudConstraintError("checkpoint recovery dataset identity does not match")
+    expected_dataset_values = {
+        "dataset_revision": _required_revision(environment, "INCUBUS_DATASET_REVISION"),
+        "dataset_sha256": _required(environment, "INCUBUS_DATASET_SHA256"),
+    }
+    if any(authenticated.get(name) != value for name, value in expected_dataset_values.items()):
+        raise CloudConstraintError("checkpoint recovery dataset binding does not match")
+    return authenticated
+
+
 _THIRD_PARTY_ENVIRONMENT_KEYS = (
     "CC",
     "CMAKE_PREFIX_PATH",
@@ -515,6 +560,84 @@ def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[s
         request_timeout_seconds=120.0,
     )
     return run_gguf_benchmark(config)
+
+
+def recover_trained_artifact(
+    *, plan: CloudExecutionPlan, environment: Mapping[str, str]
+) -> dict[str, object]:  # pragma: no cover - requires the pinned native cloud image
+    """Export and benchmark an authenticated final adapter without loading trainers."""
+
+    from huggingface_hub import snapshot_download
+
+    _require_cached_huggingface_auth()
+    checkpoint_key = _required(environment, "INCUBUS_CHECKPOINT_HMAC_KEY")
+    source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
+    source_revision = _required_revision(environment, "INCUBUS_SOURCE_REVISION")
+    store = _checkpoint_store(plan)
+    if plan.config.workspace.is_symlink() or plan.workspace.is_symlink():
+        raise CloudConstraintError("refusing symlinked ephemeral workspace")
+    plan.config.workspace.mkdir(parents=True, exist_ok=True)
+    if plan.workspace.exists() or plan.workspace.is_symlink():
+        safe_ephemeral_cleanup(plan)
+    plan.workspace.mkdir(parents=False, exist_ok=False)
+    validate_cloud_disk_preflight(plan, available_bytes=_available_workspace_bytes(plan))
+    checkpoint_root = plan.workspace / "checkpoints"
+    restored = store.restore(checkpoint_root)
+    if restored is None or not (checkpoint_root / "final-adapter").is_dir():
+        raise CloudConstraintError("authenticated final adapter is missing")
+    binding = _authenticated_recovery_binding(
+        restored,
+        environment=environment,
+        checkpoint_key=checkpoint_key,
+        run_id=plan.run_id,
+    )
+    source = plan.workspace / "source"
+    snapshot_download(
+        repo_id=source_repo,
+        revision=source_revision,
+        token=None,
+        local_dir=source,
+        allow_patterns=(
+            "*.safetensors",
+            "*.json",
+            "tokenizer.model",
+            "*.tiktoken",
+            "vocab.*",
+            "merges.txt",
+        ),
+    )
+    with _hidden_huggingface_credentials(Path.home()):
+        final = _build_gguf(
+            plan=plan,
+            source=source,
+            adapter=checkpoint_root / "final-adapter",
+            artifacts=checkpoint_root / "artifacts",
+        )
+        benchmark = _benchmark_final_gguf(plan=plan, artifact=final)
+    metadata = {
+        "artifact_sha256": _sha256_file(final),
+        "artifact_size_bytes": final.stat().st_size,
+        "benchmark": benchmark,
+        "gguf_quantization": plan.final_gguf_quantization,
+        "schema_version": 1,
+    }
+    metadata_path = final.parent / "artifact-metadata.json"
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_checkpoint_manifest(checkpoint_root, binding=binding, key=checkpoint_key)
+    store.sync(checkpoint_root)
+    result = {
+        **metadata,
+        "checkpoint_remote": True,
+        "product_id": plan.config.product_id,
+        "public_upload": "blocked_until_eval_gates",
+        "recovered_without_training": True,
+    }
+    safe_ephemeral_cleanup(plan)
+    return result
 
 
 def execute_training_and_build(
