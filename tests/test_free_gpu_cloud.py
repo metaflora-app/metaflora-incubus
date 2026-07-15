@@ -52,6 +52,7 @@ from metaflora_incubus.huggingface_publication import (
 
 CONFIG_PATH = Path("configs/cloud/free-gpu-v1.json")
 NOTEBOOK_PATH = Path("notebooks/metaflora-incubus-free-gpu.ipynb")
+RUNTIME_PATH = Path("src/metaflora_incubus/cloud_training_runtime.py")
 ENCRYPTED_BOOTSTRAP_PATH = Path("configs/cloud/bootstrap-v1.enc")
 _RUNNER_SPEC = importlib.util.spec_from_file_location(
     "incubus_test_run_free_gpu", Path("scripts/run_free_gpu.py")
@@ -496,6 +497,20 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert 'os.environ["INCUBUS_PARAMETER_COUNT"]' in source
     assert "/Users/" not in source
     assert "build_input_repo_id=" not in source.casefold()
+
+
+def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
+    source = RUNTIME_PATH.read_text(encoding="utf-8")
+
+    assert "max_steps=64" in source
+    assert "save_steps=16" in source
+    assert "gradient_accumulation_steps=8" in source
+    assert "max_steps=24" in source
+    assert "save_steps=6" in source
+    assert "gradient_accumulation_steps=4" in source
+    assert source.count("save_total_limit=2") == 2
+    assert "learning_rate=5e-6" in source
+    assert "save_safetensors=True" not in source
 
 
 def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path: Path) -> None:
