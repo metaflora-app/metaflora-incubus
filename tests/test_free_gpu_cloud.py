@@ -414,7 +414,7 @@ def test_publication_is_fail_closed_before_any_direct_upload(tmp_path: Path) -> 
         )
 
     artifact.write_bytes(b"too small")
-    with pytest.raises(CloudConstraintError, match="3 GiB"):
+    with pytest.raises(CloudConstraintError, match="2.5 GiB"):
         authorize_publication(
             artifact_path=artifact,
             gate_decision=PublicationDecision(True, ()),
