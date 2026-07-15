@@ -58,6 +58,21 @@ def test_bonsai_notebook_has_a_strict_disk_guard_and_safe_skip_receipt() -> None
     assert "raise SystemExit(0)" in raw
 
 
+def test_bonsai_notebook_builds_a_pinned_local_cuda_server_with_actionable_logs() -> None:
+    raw = notebook_source()
+
+    assert "llama.cpp-bonsai-advisory" in raw
+    assert "llama_cpp_revision" in raw
+    assert "llama.cpp revision is not pinned" in raw
+    assert "llama.cpp checkout verification failed" in raw
+    assert "-DGGML_CUDA=ON" in raw
+    assert "--target', 'llama-server" in raw
+    assert "llama-server-build.log" in raw
+    assert "llama-server build failed" in raw
+    assert "server_name = 'runs/incubus-v1-run/artifacts/llama-server'" not in raw
+    assert "restored llama-server" not in raw
+
+
 def test_bonsai_notebook_is_advisory_only_and_keeps_mandatory_h2h_separate() -> None:
     raw = notebook_source()
 
