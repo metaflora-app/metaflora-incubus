@@ -490,7 +490,7 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     assert "sys.path.insert(0, source_root)" in source
     assert "requirements/cloud-linux.lock" in source
     revisions = re.findall(r'trusted_code_revision = "([0-9a-f]{40})"', source)
-    assert revisions == ["2e88f853c2bb733f42cffdacad945b7553d5dce3"]
+    assert revisions == ["8c75009472daad688ec9887446c23d7be9443e7f"]
     assert 'git", "clone' not in source
     assert 'rev-parse", "HEAD' in source
     assert "HF_TOKEN" not in source
