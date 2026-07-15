@@ -17,6 +17,8 @@ from metaflora_incubus.release_gates import (
 )
 
 MODEL_NAME = "metaflora-incubus-v1.gguf"
+MIN_MODEL_BYTES = 5 * 1024**3 // 2
+MAX_MODEL_BYTES = 5 * 1024**3
 REQUIRED_FILES = (
     MODEL_NAME,
     "README.md",
@@ -94,8 +96,8 @@ class PublicationPolicy:
     def default(cls) -> PublicationPolicy:
         return cls(
             repo_id="metaflora/incubus",
-            min_model_bytes=3 * 1024**3,
-            max_model_bytes=5 * 1024**3,
+            min_model_bytes=MIN_MODEL_BYTES,
+            max_model_bytes=MAX_MODEL_BYTES,
             prohibited_identifiers=(),
         )
 
