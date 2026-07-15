@@ -17,11 +17,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
-	productProviderID = "metaflora-incubus"
-	productModelID    = "metaflora-incubus-v1"
+	productProviderID         = "metaflora-incubus"
+	productModelID            = "metaflora-incubus-v1"
+	artifactInactivityTimeout = 45 * time.Second
 )
 
 type RuntimeSpec struct {
@@ -71,6 +73,10 @@ type installState struct {
 	ControlBinary     string          `json:"control_binary,omitempty"`
 	ModelSHA256       string          `json:"model_sha256"`
 	ModelSizeBytes    uint64          `json:"model_size_bytes"`
+	RuntimeSHA256     string          `json:"runtime_sha256"`
+	RuntimeSizeBytes  uint64          `json:"runtime_size_bytes"`
+	ServerSHA256      string          `json:"server_sha256"`
+	ServerSizeBytes   uint64          `json:"server_size_bytes"`
 }
 
 func RunCLI(ctx context.Context, args []string, stdout, stderr io.Writer, config CLIConfig) int {
@@ -210,6 +216,14 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 	if err := validateStagedRuntime(staging, config.Platform.OS); err != nil {
 		return err
 	}
+	runtimeSHA256, runtimeSizeBytes, err := fileIntegrity(filepath.Join(staging, "bin", runtimeBinaryName(config.Platform.OS)))
+	if err != nil {
+		return fmt.Errorf("inspect runtime wrapper: %w", err)
+	}
+	serverSHA256, serverSizeBytes, err := fileIntegrity(filepath.Join(staging, "bin", "llama-server"))
+	if err != nil {
+		return fmt.Errorf("inspect inference server: %w", err)
+	}
 	modelDestination := filepath.Join(staging, "models", "incubus-v1.gguf")
 	if err := os.MkdirAll(filepath.Dir(modelDestination), 0o700); err != nil {
 		return err
@@ -340,6 +354,10 @@ func install(ctx context.Context, config CLIConfig, registerOllama bool) (result
 		ControlBinary:     controlDestination,
 		ModelSHA256:       modelSHA256,
 		ModelSizeBytes:    modelSizeBytes,
+		RuntimeSHA256:     runtimeSHA256,
+		RuntimeSizeBytes:  runtimeSizeBytes,
+		ServerSHA256:      serverSHA256,
+		ServerSizeBytes:   serverSizeBytes,
 	}
 	if registerOllama {
 		if config.RegisterOllama == nil {
@@ -466,8 +484,8 @@ func downloadArtifact(
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(
-		io.MultiWriter(file, hash), io.LimitReader(response.Body, int64(artifact.SizeBytes)+1),
+	written, copyErr := copyWithInactivityTimeout(
+		io.MultiWriter(file, hash), response.Body, int64(artifact.SizeBytes)+1, artifactInactivityTimeout,
 	)
 	closeErr := file.Close()
 	if copyErr != nil {
@@ -488,6 +506,75 @@ func downloadArtifact(
 		return errors.New("artifact signature verification failed")
 	}
 	return nil
+}
+
+func copyWithInactivityTimeout(destination io.Writer, source io.ReadCloser, maximumBytes int64, inactivity time.Duration) (int64, error) {
+	if maximumBytes < 1 || inactivity <= 0 {
+		return 0, errors.New("download limits are invalid")
+	}
+	activity := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	watchdogDone := make(chan struct{})
+	timedOut := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		timer := time.NewTimer(inactivity)
+		defer timer.Stop()
+		for {
+			select {
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(inactivity)
+			case <-timer.C:
+				close(timedOut)
+				_ = source.Close()
+				return
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-watchdogDone
+	}()
+
+	reader := io.LimitReader(source, maximumBytes)
+	buffer := make([]byte, 1024*1024)
+	var written int64
+	for {
+		count, readErr := reader.Read(buffer)
+		if count > 0 {
+			outputCount, writeErr := destination.Write(buffer[:count])
+			written += int64(outputCount)
+			if writeErr != nil {
+				return written, writeErr
+			}
+			if outputCount != count {
+				return written, io.ErrShortWrite
+			}
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+		}
+		if readErr != nil {
+			select {
+			case <-timedOut:
+				return written, errors.New("artifact download became inactive")
+			default:
+			}
+			if errors.Is(readErr, io.EOF) {
+				return written, nil
+			}
+			return written, readErr
+		}
+	}
 }
 
 func extractTarGzip(archivePath, destination string, maximumExpandedBytes uint64) error {
@@ -536,7 +623,7 @@ func extractTarGzip(archivePath, destination string, maximumExpandedBytes uint64
 			return err
 		}
 		mode := os.FileMode(0o600)
-		if clean == filepath.Join("bin", "incubus-runtime") || clean == filepath.Join("bin", "incubus-runtime.exe") {
+		if clean == filepath.Join("bin", "incubus-runtime") || clean == filepath.Join("bin", "incubus-runtime.exe") || clean == filepath.Join("bin", "llama-server") {
 			mode = 0o700
 		}
 		file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
@@ -744,8 +831,15 @@ func readInstallState(path, installRoot string) (installState, error) {
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return state, err
 	}
-	digest, digestErr := hex.DecodeString(state.ModelSHA256)
-	if state.SchemaVersion != 1 || state.Release == "" || state.ArtifactID == "" || state.Runtime.Host != "127.0.0.1" || digestErr != nil || len(digest) != sha256.Size || state.ModelSizeBytes == 0 {
+	digests := []string{state.ModelSHA256, state.RuntimeSHA256, state.ServerSHA256}
+	validDigests := true
+	for _, encoded := range digests {
+		digest, digestErr := hex.DecodeString(encoded)
+		if digestErr != nil || len(digest) != sha256.Size {
+			validDigests = false
+		}
+	}
+	if state.SchemaVersion != 1 || state.Release == "" || state.ArtifactID == "" || state.Runtime.Host != "127.0.0.1" || !validDigests || state.ModelSizeBytes == 0 || state.RuntimeSizeBytes == 0 || state.ServerSizeBytes == 0 {
 		return state, errors.New("invalid install state")
 	}
 	expectedModelPath := filepath.Join(filepath.Clean(installRoot), "current", "models", "incubus-v1.gguf")

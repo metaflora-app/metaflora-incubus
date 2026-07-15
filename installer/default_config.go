@@ -59,7 +59,9 @@ func NewProductionCLIConfig(options ProductionOptions) (CLIConfig, error) {
 	if signatureURL == "" {
 		signatureURL = defaultSignatureURL
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 45 * time.Second
+	client := &http.Client{Transport: transport}
 	platform, err := NormalizePlatform(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return CLIConfig{}, err

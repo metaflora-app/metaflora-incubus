@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -17,6 +19,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 DIMENSIONS = (
     "coding",
     "tool_calling",
@@ -27,6 +32,9 @@ DIMENSIONS = (
 )
 LANGUAGES = ("ru", "en")
 _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}")
+_LOWER_HEX_40 = re.compile(r"[0-9a-f]{40}")
+PRODUCTION_ATTESTATION_PUBLIC_KEY = "eqUEQBjrmtGSwGRtxYBiui3L7s0MzV_mx28PFLjTUA8="
+PINNED_V1_CASE_BANK_SHA256 = "9f18aba6bed35a1165cb5015ab10302f6a219c10ea1e564838a77cc3bcd75d49"
 _REFUSAL_MARKERS = (
     "i can't help",
     "i cannot help",
@@ -98,6 +106,7 @@ class BenchmarkRunnerConfig:
     port: int
     health_timeout_seconds: float
     request_timeout_seconds: float
+    runner_code_revision: str
 
     @classmethod
     def create(cls, **values: object) -> BenchmarkRunnerConfig:
@@ -113,6 +122,9 @@ class BenchmarkRunnerConfig:
         request_timeout = _positive_float(
             values.get("request_timeout_seconds"), "request_timeout_seconds"
         )
+        runner_revision = values.get("runner_code_revision")
+        if not isinstance(runner_revision, str) or _LOWER_HEX_40.fullmatch(runner_revision) is None:
+            raise GgufBenchmarkError("runner_code_revision must be exact lowercase revision")
         return cls(
             server_binary=_required_path(values.get("server_binary"), "server_binary"),
             server_sha256=server_sha,
@@ -124,6 +136,7 @@ class BenchmarkRunnerConfig:
             port=port,
             health_timeout_seconds=health_timeout,
             request_timeout_seconds=request_timeout,
+            runner_code_revision=runner_revision,
         )
 
 
@@ -196,6 +209,7 @@ def run_gguf_benchmark(
     http_client: HttpClient | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
+    _attestation_signer: Callable[[bytes], bytes] | None = None,
 ) -> dict[str, object]:
     """Run every case against a pinned local server and atomically write evidence."""
     _verify_runtime_artifact(config.server_binary, config.server_sha256, "server binary")
@@ -251,7 +265,12 @@ def run_gguf_benchmark(
         _stop_process(process)
     if len(raw_rows) != len(cases):
         raise GgufBenchmarkError("benchmark run is incomplete")
-    return _write_evidence(config, cases, raw_rows)
+    return _write_evidence(
+        config,
+        cases,
+        raw_rows,
+        attestation_signer=_attestation_signer or _production_attestation_signer,
+    )
 
 
 def _parse_case(document: object) -> BenchmarkCase:
@@ -396,10 +415,15 @@ def _write_evidence(
     config: BenchmarkRunnerConfig,
     cases: tuple[BenchmarkCase, ...],
     raw_rows: list[dict[str, object]],
+    *,
+    attestation_signer: Callable[[bytes], bytes],
 ) -> dict[str, object]:
-    case_rows = [_case_document(case) for case in cases]
-    cases_payload = _jsonl_bytes(case_rows)
+    cases_payload = config.cases_path.read_bytes()
     raw_payload = _jsonl_bytes(raw_rows)
+    cases_sha = hashlib.sha256(cases_payload).hexdigest()
+    if cases_sha != PINNED_V1_CASE_BANK_SHA256:
+        raise GgufBenchmarkError("benchmark case bank is not the pinned release suite")
+    raw_sha = hashlib.sha256(raw_payload).hexdigest()
     scores = {
         dimension: round(
             sum(float(row["score"]) for row in raw_rows if row["dimension"] == dimension)
@@ -411,8 +435,8 @@ def _write_evidence(
     evidence: dict[str, object] = {
         "artifact_sha256": config.model_sha256,
         "case_count": len(cases),
-        "cases_sha256": hashlib.sha256(cases_payload).hexdigest(),
-        "raw_sha256": hashlib.sha256(raw_payload).hexdigest(),
+        "cases_sha256": cases_sha,
+        "raw_sha256": raw_sha,
         "refusal_rate": round(sum(bool(row["refused"]) for row in raw_rows) / len(raw_rows), 6),
         "runtime_sha256": config.server_sha256,
         "scores": scores,
@@ -422,11 +446,42 @@ def _write_evidence(
     config.output_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write(config.output_dir / "benchmark-cases.jsonl", cases_payload)
     _atomic_write(config.output_dir / "benchmark-raw.jsonl", raw_payload)
+    attestation = {
+        "artifact_sha256": config.model_sha256,
+        "dataset_sha256": cases_sha,
+        "raw_output_sha256": raw_sha,
+        "runner_code_revision": config.runner_code_revision,
+        "sample_count": len(raw_rows),
+        "schema_version": 1,
+        "seeds": [config.seed],
+    }
+    attestation_payload = _canonical_json(attestation) + b"\n"
+    signature = attestation_signer(attestation_payload)
+    if not isinstance(signature, bytes) or len(signature) != 64:
+        raise GgufBenchmarkError("benchmark attestation signer returned an invalid signature")
+    _atomic_write(config.output_dir / "benchmark-attestation.json", attestation_payload)
+    _atomic_write(config.output_dir / "benchmark-attestation.sig", signature)
     _atomic_write(
         config.output_dir / "benchmark-evidence.json",
         _canonical_json(evidence) + b"\n",
     )
     return evidence
+
+
+def _production_attestation_signer(payload: bytes) -> bytes:
+    encoded = os.environ.get("INCUBUS_BENCHMARK_SIGNING_KEY", "")
+    try:
+        private_bytes = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        private_key = Ed25519PrivateKey.from_private_bytes(private_bytes)
+        public_bytes = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        expected_public = base64.urlsafe_b64decode(
+            PRODUCTION_ATTESTATION_PUBLIC_KEY.encode("ascii")
+        )
+    except (ValueError, binascii.Error, UnicodeEncodeError) as exc:
+        raise GgufBenchmarkError("benchmark signing key is invalid") from exc
+    if public_bytes != expected_public:
+        raise GgufBenchmarkError("benchmark signing key does not match the production key")
+    return private_key.sign(payload)
 
 
 def _case_document(case: BenchmarkCase) -> dict[str, object]:

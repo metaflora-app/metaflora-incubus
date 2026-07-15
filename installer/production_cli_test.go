@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,31 @@ func TestInstallPersistsControlBinary(t *testing.T) {
 	}
 	if state.ControlBinary != destination {
 		t.Fatalf("ControlBinary = %q, want %q", state.ControlBinary, destination)
+	}
+}
+
+func TestProductionHTTPClientDoesNotApplyMetadataTimeoutToModelBody(t *testing.T) {
+	publicKey, _, keyErr := ed25519.GenerateKey(nil)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	executable := filepath.Join(t.TempDir(), "incubusctl")
+	if err := os.WriteFile(executable, []byte("controller"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config, err := NewProductionCLIConfig(ProductionOptions{
+		PinnedPublicKey: publicKey,
+		Executable:      executable,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.HTTPClient.Timeout != 0 {
+		t.Fatalf("HTTP client timeout = %s; multi-gigabyte response bodies must not share a metadata deadline", config.HTTPClient.Timeout)
+	}
+	transport, ok := config.HTTPClient.Transport.(*http.Transport)
+	if !ok || transport.ResponseHeaderTimeout <= 0 {
+		t.Fatalf("HTTP transport = %#v; want a bounded response-header timeout", config.HTTPClient.Transport)
 	}
 }
 
@@ -144,6 +170,8 @@ func TestInstallStateRejectsModelPathOutsideManagedRoot(t *testing.T) {
 		SchemaVersion: 1, Release: "v1", ArtifactID: "runtime+model",
 		Runtime:     RuntimeSpec{Host: "127.0.0.1", ModelPath: outside, ModelID: productModelID},
 		ModelSHA256: strings.Repeat("a", 64), ModelSizeBytes: 1,
+		RuntimeSHA256: strings.Repeat("b", 64), RuntimeSizeBytes: 1,
+		ServerSHA256: strings.Repeat("c", 64), ServerSizeBytes: 1,
 	}
 	path := filepath.Join(root, "install-state.json")
 	if err := writeJSON(path, state); err != nil {
@@ -170,6 +198,8 @@ func TestInstallStateRejectsSymlinkedModelParent(t *testing.T) {
 		SchemaVersion: 1, Release: "v1", ArtifactID: "runtime+model",
 		Runtime:     RuntimeSpec{Host: "127.0.0.1", ModelPath: filepath.Join(root, "current", "models", "incubus-v1.gguf"), ModelID: productModelID},
 		ModelSHA256: strings.Repeat("a", 64), ModelSizeBytes: 1,
+		RuntimeSHA256: strings.Repeat("b", 64), RuntimeSizeBytes: 1,
+		ServerSHA256: strings.Repeat("c", 64), ServerSizeBytes: 1,
 	}
 	path := filepath.Join(root, "install-state.json")
 	if err := writeJSON(path, state); err != nil {
@@ -221,6 +251,26 @@ func TestMissingLaunchdServiceIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestValidateStagedRuntimeRequiresBundledInferenceServer(t *testing.T) {
+	staging := t.TempDir()
+	bin := filepath.Join(staging, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "incubus-runtime"), []byte("wrapper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateStagedRuntime(staging, "darwin"); err == nil || !strings.Contains(err.Error(), "server") {
+		t.Fatalf("validateStagedRuntime() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "llama-server"), []byte("server"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateStagedRuntime(staging, "darwin"); err != nil {
+		t.Fatalf("validateStagedRuntime() error = %v", err)
+	}
+}
+
 func TestDoctorDetectsModifiedInstalledWeights(t *testing.T) {
 	release := newFakeRelease(t, releaseFaults{})
 	defer release.close()
@@ -242,6 +292,29 @@ func TestDoctorDetectsModifiedInstalledWeights(t *testing.T) {
 		t.Fatalf("model integrity was not persisted: %#v", state)
 	}
 	if err := os.WriteFile(state.Runtime.ModelPath, []byte("modified weights"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode, _, stderr := runCLI(t, config, "doctor")
+	if exitCode == 0 || !strings.Contains(strings.ToLower(stderr), "integrity") {
+		t.Fatalf("doctor exit=%d stderr=%q", exitCode, stderr)
+	}
+}
+
+func TestDoctorDetectsModifiedBundledInferenceServer(t *testing.T) {
+	release := newFakeRelease(t, releaseFaults{})
+	defer release.close()
+	runtimeHarness := &runtimeHarness{}
+	defer func() {
+		if runtimeHarness.server != nil {
+			runtimeHarness.server.Close()
+		}
+	}()
+	config := testCLIConfig(t, release, runtimeHarness, &ollamaHarness{})
+	if exitCode, _, stderr := runCLI(t, config, "install", "--non-interactive"); exitCode != 0 {
+		t.Fatalf("install failed: %s", stderr)
+	}
+	server := filepath.Join(config.InstallRoot, "current", "bin", "llama-server")
+	if err := os.WriteFile(server, []byte("modified inference server"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	exitCode, _, stderr := runCLI(t, config, "doctor")

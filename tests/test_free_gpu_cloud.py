@@ -63,6 +63,16 @@ free_gpu_runner = importlib.util.module_from_spec(_RUNNER_SPEC)
 _RUNNER_SPEC.loader.exec_module(free_gpu_runner)
 
 
+@pytest.fixture(autouse=True)
+def allow_ephemeral_benchmark_key_only_inside_bootstrap_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "metaflora_incubus.cloud_bootstrap._benchmark_signing_key_matches_production",
+        lambda value: True,
+    )
+
+
 @pytest.mark.parametrize("failure_stage", ("revision", "vram", "plan"))
 def test_runner_reports_every_early_execution_failure_after_argument_parsing(
     monkeypatch: pytest.MonkeyPatch, failure_stage: str
@@ -222,6 +232,7 @@ def test_plan_keeps_intermediate_weights_off_the_users_mac() -> None:
 def test_final_cloud_artifact_runs_pinned_local_benchmark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("INCUBUS_CODE_REVISION", "1" * 40)
     config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend.HF_PRIVATE_BRANCH,
@@ -264,6 +275,7 @@ def test_final_cloud_artifact_runs_pinned_local_benchmark(
 def test_recovered_artifact_uses_synced_benchmark_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("INCUBUS_CODE_REVISION", "1" * 40)
     config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
     target = RemoteCheckpointTarget.create(
         backend=CheckpointBackend.HF_PRIVATE_BRANCH,
@@ -606,6 +618,7 @@ def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path
         "INCUBUS_DATASET_REVISION": "b" * 40,
         "INCUBUS_DATASET_SHA256": "c" * 64,
         "INCUBUS_PARAMETER_COUNT": "7000000000",
+        "INCUBUS_BENCHMARK_SIGNING_KEY": base64.urlsafe_b64encode(b"k" * 32).decode(),
     }
     payload = json.dumps(
         {
@@ -653,6 +666,7 @@ def test_bootstrap_rejects_invalid_parameter_count(tmp_path: Path, parameter_cou
         "INCUBUS_DATASET_REVISION": "b" * 40,
         "INCUBUS_DATASET_SHA256": "c" * 64,
         "INCUBUS_PARAMETER_COUNT": parameter_count,
+        "INCUBUS_BENCHMARK_SIGNING_KEY": base64.urlsafe_b64encode(b"k" * 32).decode(),
     }
     payload = json.dumps(
         {"hf_token": "token", "hf_stored_tokens": "stored", "environment": values}

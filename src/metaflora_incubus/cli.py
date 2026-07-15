@@ -196,11 +196,13 @@ def _evaluate(args: argparse.Namespace) -> int:
 
 
 def _publish_hf(args: argparse.Namespace) -> int:
+    from metaflora_incubus.gguf_benchmark_runner import PRODUCTION_ATTESTATION_PUBLIC_KEY
     from metaflora_incubus.huggingface_publication import (
         HuggingFaceHubUploader,
         PublicationPolicy,
         evaluate_publication_bundle,
         publish_to_huggingface,
+        verify_production_signature,
     )
 
     base = PublicationPolicy.default()
@@ -223,21 +225,13 @@ def _publish_hf(args: argparse.Namespace) -> int:
 
     verifier = reject_signature
     if args.public_key is not None:
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        public_key = Ed25519PublicKey.from_public_bytes(
-            base64.b64decode(args.public_key.read_text(encoding="ascii").strip(), validate=True)
+        supplied = base64.urlsafe_b64decode(
+            args.public_key.read_text(encoding="ascii").strip().encode("ascii")
         )
-
-        def verify_signature(_purpose: str, payload: bytes, signature: bytes) -> bool:
-            try:
-                public_key.verify(signature, payload)
-            except InvalidSignature:
-                return False
-            return True
-
-        verifier = verify_signature
+        expected = base64.urlsafe_b64decode(PRODUCTION_ATTESTATION_PUBLIC_KEY.encode("ascii"))
+        if supplied != expected:
+            raise SystemExit("public key is not the pinned production release key")
+        verifier = verify_production_signature
 
     if not args.dry_run:
         if args.public_key is None or args.prohibited_identifiers is None:

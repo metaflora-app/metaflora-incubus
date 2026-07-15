@@ -10,7 +10,9 @@ import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from metaflora_incubus.cloud_training import CloudConstraintError
 
@@ -22,6 +24,7 @@ BOOTSTRAP_ENV_NAMES = (
     "INCUBUS_DATASET_REVISION",
     "INCUBUS_DATASET_SHA256",
     "INCUBUS_PARAMETER_COUNT",
+    "INCUBUS_BENCHMARK_SIGNING_KEY",
 )
 _ENCRYPTED_BOOTSTRAP_MAGIC = b"INCUBUS1"
 _ENCRYPTED_BOOTSTRAP_AAD = b"metaflora-incubus-cloud-bootstrap-v1"
@@ -104,6 +107,8 @@ def install_cloud_bootstrap(
         raise CloudConstraintError("parameter count must be an integer") from exc
     if parameter_count <= 0 or parameter_count > 7_500_000_000:
         raise CloudConstraintError("parameter count is outside the compact cloud profile")
+    if not _benchmark_signing_key_matches_production(values["INCUBUS_BENCHMARK_SIGNING_KEY"]):
+        raise CloudConstraintError("benchmark signing key does not match the production key")
 
     cache = home / ".cache" / "huggingface"
     _private_atomic_write(cache / "token", token)
@@ -112,3 +117,17 @@ def install_cloud_bootstrap(
         environment[name] = values[name]
     environment.pop("HF_TOKEN", None)
     return parameter_count
+
+
+def _benchmark_signing_key_matches_production(encoded_key: str) -> bool:
+    from metaflora_incubus.gguf_benchmark_runner import PRODUCTION_ATTESTATION_PUBLIC_KEY
+
+    try:
+        private_key = Ed25519PrivateKey.from_private_bytes(
+            base64.urlsafe_b64decode(encoded_key.encode("ascii"))
+        )
+        actual = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        expected = base64.urlsafe_b64decode(PRODUCTION_ATTESTATION_PUBLIC_KEY.encode("ascii"))
+    except (ValueError, binascii.Error, UnicodeEncodeError):
+        return False
+    return actual == expected

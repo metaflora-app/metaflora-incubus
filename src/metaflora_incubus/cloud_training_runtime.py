@@ -210,18 +210,17 @@ def _authenticated_recovery_binding(
     if authenticated.get("run_id") != run_id:
         raise CloudConstraintError("checkpoint recovery run identity does not match")
     source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
-    if authenticated.get("source_repo_sha256") != hashlib.sha256(
-        source_repo.encode()
-    ).hexdigest():
+    if authenticated.get("source_repo_sha256") != hashlib.sha256(source_repo.encode()).hexdigest():
         raise CloudConstraintError("checkpoint recovery source identity does not match")
     if authenticated.get("source_revision") != _required_revision(
         environment, "INCUBUS_SOURCE_REVISION"
     ):
         raise CloudConstraintError("checkpoint recovery source revision does not match")
     dataset_repo = _required(environment, "INCUBUS_DATASET_REPO")
-    if authenticated.get("dataset_repo_sha256") != hashlib.sha256(
-        dataset_repo.encode()
-    ).hexdigest():
+    if (
+        authenticated.get("dataset_repo_sha256")
+        != hashlib.sha256(dataset_repo.encode()).hexdigest()
+    ):
         raise CloudConstraintError("checkpoint recovery dataset identity does not match")
     expected_dataset_values = {
         "dataset_revision": _required_revision(environment, "INCUBUS_DATASET_REVISION"),
@@ -571,9 +570,7 @@ def _build_gguf(
         merged.unlink(missing_ok=True)
     if (
         not final.is_file()
-        or not MIN_MODEL_BYTES
-        <= final.stat().st_size
-        <= plan.config.profile.final_gguf_max_bytes
+        or not MIN_MODEL_BYTES <= final.stat().st_size <= plan.config.profile.final_gguf_max_bytes
     ):
         raise CloudConstraintError(
             f"{plan.final_gguf_quantization} GGUF must remain inside the 2.5-5 GiB cloud range"
@@ -603,9 +600,7 @@ def _reusable_final_gguf(*, plan: CloudExecutionPlan, checkpoint_root: Path) -> 
     return artifact
 
 
-def _write_artifact_state(
-    *, checkpoint_root: Path, final: Path, phase: str
-) -> dict[str, object]:
+def _write_artifact_state(*, checkpoint_root: Path, final: Path, phase: str) -> dict[str, object]:
     state = {
         "artifact_sha256": _sha256_file(final),
         "artifact_size_bytes": final.stat().st_size,
@@ -614,8 +609,7 @@ def _write_artifact_state(
     }
     path = checkpoint_root / "artifacts" / "recovery-state.json"
     path.write_text(
-        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n",
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     return state
@@ -648,6 +642,7 @@ def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[s
         port=18081,
         health_timeout_seconds=120.0,
         request_timeout_seconds=120.0,
+        runner_code_revision=_required_revision(os.environ, "INCUBUS_CODE_REVISION"),
     )
     return run_gguf_benchmark(config)
 
@@ -727,8 +722,7 @@ def recover_trained_artifact(
     }
     metadata_path = final.parent / "artifact-metadata.json"
     metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n",
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
     _write_artifact_state(

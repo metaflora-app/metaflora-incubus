@@ -120,6 +120,7 @@ def main() -> int:
             "INCUBUS_DATASET_REVISION",
             "INCUBUS_DATASET_SHA256",
             "INCUBUS_PARAMETER_COUNT",
+            "INCUBUS_BENCHMARK_SIGNING_KEY",
         )
         missing = tuple(name for name in required if not os.environ.get(name))
         if missing:

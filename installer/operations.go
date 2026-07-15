@@ -159,7 +159,8 @@ func doctorInstalled(ctx context.Context, output io.Writer, config CLIConfig) er
 
 func verifyInstalledFiles(state installState, config CLIConfig) error {
 	runtimePath := filepath.Join(config.InstallRoot, "current", "bin", runtimeBinaryName(config.Platform.OS))
-	for _, path := range []string{state.Runtime.ModelPath, runtimePath} {
+	serverPath := filepath.Join(config.InstallRoot, "current", "bin", "llama-server")
+	for _, path := range []string{state.Runtime.ModelPath, runtimePath, serverPath} {
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("required installed file is missing or unsafe: %s", path)
@@ -178,17 +179,33 @@ func verifyInstalledFiles(state installState, config CLIConfig) error {
 	if modelSHA256 != state.ModelSHA256 || modelSizeBytes != state.ModelSizeBytes {
 		return errors.New("model integrity check failed: installed weights were modified")
 	}
+	for _, expected := range []struct {
+		name   string
+		path   string
+		sha256 string
+		size   uint64
+	}{
+		{name: "runtime wrapper", path: runtimePath, sha256: state.RuntimeSHA256, size: state.RuntimeSizeBytes},
+		{name: "inference server", path: serverPath, sha256: state.ServerSHA256, size: state.ServerSizeBytes},
+	} {
+		digest, size, err := fileIntegrity(expected.path)
+		if err != nil || digest != expected.sha256 || size != expected.size {
+			return fmt.Errorf("%s integrity check failed: installed runtime was modified", expected.name)
+		}
+	}
 	return nil
 }
 
 func validateStagedRuntime(staging, osName string) error {
-	runtimePath := filepath.Join(staging, "bin", runtimeBinaryName(osName))
-	info, err := os.Lstat(runtimePath)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("runtime artifact does not contain the required regular executable")
-	}
-	if !strings.EqualFold(osName, "windows") && info.Mode().Perm()&0o111 == 0 {
-		return errors.New("runtime artifact executable has unsafe permissions")
+	for _, name := range []string{runtimeBinaryName(osName), "llama-server"} {
+		path := filepath.Join(staging, "bin", name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("runtime artifact does not contain the required regular executable %q", name)
+		}
+		if !strings.EqualFold(osName, "windows") && info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("runtime artifact executable %q has unsafe permissions", name)
+		}
 	}
 	return nil
 }

@@ -57,6 +57,7 @@ def config(tmp_path: Path) -> BenchmarkRunnerConfig:
         port=18081,
         health_timeout_seconds=2.0,
         request_timeout_seconds=5.0,
+        runner_code_revision="1" * 40,
     )
 
 
@@ -117,6 +118,7 @@ def test_runner_starts_pinned_server_and_writes_bound_evidence(tmp_path: Path) -
         http_client=http_client,
         monotonic=lambda: next(ticks),
         sleeper=lambda _: None,
+        _attestation_signer=lambda payload: b"s" * 64,
     )
 
     assert len(commands) == 1
@@ -168,6 +170,19 @@ def test_runner_starts_pinned_server_and_writes_bound_evidence(tmp_path: Path) -
     assert all("tool_call_parse" in row for row in raw_rows)
     assert stored_evidence == evidence
     assert stored_evidence["raw_sha256"] == digest(active_config.output_dir / "benchmark-raw.jsonl")
+    attestation = json.loads(
+        (active_config.output_dir / "benchmark-attestation.json").read_text(encoding="utf-8")
+    )
+    assert attestation == {
+        "artifact_sha256": active_config.model_sha256,
+        "dataset_sha256": digest(CASES_PATH),
+        "raw_output_sha256": digest(active_config.output_dir / "benchmark-raw.jsonl"),
+        "runner_code_revision": "1" * 40,
+        "sample_count": 48,
+        "schema_version": 1,
+        "seeds": [4242],
+    }
+    assert (active_config.output_dir / "benchmark-attestation.sig").read_bytes() == b"s" * 64
 
 
 def test_runner_fails_before_process_on_artifact_mismatch(tmp_path: Path) -> None:

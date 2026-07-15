@@ -24,10 +24,24 @@ REQUIRED_FILES = (
     "benchmark-provenance.sig",
     "benchmark-cases.jsonl",
     "benchmark-raw.jsonl",
+    "benchmark-attestation.json",
+    "benchmark-attestation.sig",
     "smoke-test.json",
     "smoke-test.sig",
     "Modelfile",
 )
+ROOT = Path(__file__).resolve().parents[1]
+CASES_PATH = ROOT / "benchmarks" / "gguf-v1-cases.jsonl"
+
+
+@pytest.fixture(autouse=True)
+def accept_ephemeral_attestations_only_in_publication_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "metaflora_incubus.benchmark_evidence._verify_pinned_attestation_signature",
+        lambda payload, signature: signature == b"s" * 64 or signature.startswith(b"valid:"),
+    )
 
 
 def publication_module():
@@ -76,7 +90,7 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
     (root / "LICENSE").write_text("Apache License 2.0\n", encoding="utf-8")
     # Legal attribution is mandatory and is not a product/model-card naming surface.
     (root / "THIRD_PARTY_NOTICES").write_text(
-        "Required attribution for forbidden-source components.\n",
+        "Approved third-party notices.\n",
         encoding="utf-8",
     )
     (root / "SHA256SUMS").write_text(f"{artifact_sha}  {MODEL_NAME}\n", encoding="utf-8")
@@ -99,6 +113,87 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
     )
     (root / "release-manifest.sig").write_bytes(b"valid:release_manifest")
 
+    case_rows = [json.loads(line) for line in CASES_PATH.read_text(encoding="utf-8").splitlines()]
+    raw_rows = []
+    for case in case_rows:
+        dimension = case["dimension"]
+        content = ""
+        raw_response: dict[str, object]
+        if dimension in {"tool_calling", "agentic_search"}:
+            raw_response = {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": case["expected_tool_name"],
+                                        "arguments": json.dumps(
+                                            case["expected_tool_arguments"], sort_keys=True
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        else:
+            content = " ".join(case["required_terms"]) or "measured response"
+            raw_response = {
+                "choices": [{"finish_reason": "stop", "message": {"content": content}}]
+            }
+        raw_rows.append(
+            {
+                "artifact_sha256": artifact_sha,
+                "case_id": case["case_id"],
+                "dimension": dimension,
+                "raw_response": raw_response,
+                "response": content,
+                "score": 1.0,
+                "scores": {dimension: 1.0},
+                "refused": False,
+                "seed": 4242,
+            }
+        )
+    cases_payload = CASES_PATH.read_bytes()
+    (root / "benchmark-cases.jsonl").write_bytes(cases_payload)
+    raw_payload = write_jsonl(root / "benchmark-raw.jsonl", raw_rows)
+    dataset_sha = sha256_bytes(cases_payload)
+    raw_sha = sha256_bytes(raw_payload)
+    attestation_payload = (
+        json.dumps(
+            {
+                "artifact_sha256": artifact_sha,
+                "dataset_sha256": dataset_sha,
+                "raw_output_sha256": raw_sha,
+                "runner_code_revision": "1" * 40,
+                "sample_count": len(raw_rows),
+                "schema_version": 1,
+                "seeds": [4242],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    (root / "benchmark-attestation.json").write_bytes(attestation_payload)
+    (root / "benchmark-attestation.sig").write_bytes(b"s" * 64)
+
+    def binding(label: str, *, deployable: bool = False) -> dict[str, object]:
+        return {
+            "artifact_sha256": artifact_sha if deployable else sha256_bytes(label.encode()),
+            "dataset_sha256": dataset_sha,
+            "raw_output_sha256": raw_sha if deployable else sha256_bytes(f"raw:{label}".encode()),
+            "sample_count": len(raw_rows),
+            "seeds": [4242],
+            "runner_code_revision": "1" * 40,
+            "attestation_sha256": sha256_bytes(attestation_payload),
+        }
+
     report_payload = write_json(
         root / "benchmark-report.json",
         {
@@ -108,29 +203,34 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             "gate_input": {
                 "candidate": {
                     "artifact_id": "candidate-full",
-                    "scores": release_scores(0.94),
-                    "overrefusal_rate": 0.03,
+                    "scores": release_scores(1.0),
+                    "overrefusal_rate": 0.0,
+                    "evidence_binding": binding("candidate-full"),
                 },
                 "deployable_candidate": {
                     "artifact_id": "candidate-q5",
-                    "scores": release_scores(0.93),
-                    "overrefusal_rate": 0.04,
+                    "scores": release_scores(1.0),
+                    "overrefusal_rate": 0.0,
+                    "evidence_binding": binding("candidate-q5", deployable=True),
                 },
                 "baselines": {
                     "reference": {
                         "artifact_id": "reference",
-                        "scores": release_scores(0.88),
-                        "overrefusal_rate": 0.20,
+                        "scores": release_scores(0.0),
+                        "overrefusal_rate": 0.125,
+                        "evidence_binding": binding("reference"),
                     },
                     "competitor_a": {
                         "artifact_id": "competitor-a",
-                        "scores": release_scores(0.70),
-                        "overrefusal_rate": 0.18,
+                        "scores": release_scores(0.0),
+                        "overrefusal_rate": 0.0,
+                        "evidence_binding": binding("competitor-a"),
                     },
                     "competitor_b": {
                         "artifact_id": "competitor-b",
-                        "scores": release_scores(0.71),
-                        "overrefusal_rate": 0.17,
+                        "scores": release_scores(0.0),
+                        "overrefusal_rate": 0.0,
+                        "evidence_binding": binding("competitor-b"),
                     },
                 },
                 "policy": {
@@ -146,21 +246,6 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             },
         },
     )
-    case_rows = [
-        {"case_id": f"release-{index:03d}", "prompt": f"Release case {index}"}
-        for index in range(100)
-    ]
-    raw_rows = [
-        {
-            "case_id": f"release-{index:03d}",
-            "response": f"Measured response {index}",
-            "scores": release_scores(1.0 if index < 93 else 0.0),
-            "refused": index < 4,
-        }
-        for index in range(100)
-    ]
-    cases_payload = write_jsonl(root / "benchmark-cases.jsonl", case_rows)
-    raw_payload = write_jsonl(root / "benchmark-raw.jsonl", raw_rows)
     provenance_payload = write_json(
         root / "benchmark-provenance.json",
         {
@@ -172,7 +257,8 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             "raw_output_sha256": sha256_bytes(raw_payload),
             "sample_count": len(raw_rows),
             "runtime": "llama.cpp-b7001",
-            "seeds": [17, 29, 43],
+            "seeds": [4242],
+            "attestation_sha256": sha256_bytes(attestation_payload),
         },
     )
     (root / "benchmark-provenance.sig").write_bytes(b"valid:benchmark_provenance")
@@ -195,8 +281,9 @@ def build_valid_bundle(root: Path, *, model_bytes: bytes = b"GGUFcompact-model")
             "artifact_sha256": artifact_sha,
             "runtime": "llama.cpp-b7001",
             "status": "passed",
-            "request": "Reply with the word ready.",
-            "response": "ready",
+            "case_id": case_rows[0]["case_id"],
+            "request": case_rows[0]["prompt"],
+            "response": raw_rows[0]["response"],
         },
     )
     return {
@@ -289,12 +376,35 @@ def test_complete_verified_bundle_is_approved(tmp_path: Path) -> None:
 
     assert decision.approved is True
     assert decision.blockers == ()
-    assert {purpose for purpose, _payload, _signature in verifier.calls} == {
-        "release_manifest",
-        "benchmark_decision",
-        "benchmark_provenance",
-        "smoke_test",
-    }
+
+
+def test_unsigned_external_candidate_scores_without_evidence_binding_are_blocked(
+    tmp_path: Path,
+) -> None:
+    publications = publication_module()
+    build_valid_bundle(tmp_path)
+    report_path = tmp_path / "benchmark-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    del report["gate_input"]["candidate"]["evidence_binding"]
+    report_payload = write_json(report_path, report)
+    provenance_path = tmp_path / "benchmark-provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance["report_sha256"] = sha256_bytes(report_payload)
+    provenance_payload = write_json(provenance_path, provenance)
+    decision_path = tmp_path / "benchmark-decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision["report_sha256"] = sha256_bytes(report_payload)
+    decision["provenance_sha256"] = sha256_bytes(provenance_payload)
+    write_json(decision_path, decision)
+
+    result = publications.evaluate_publication_bundle(
+        tmp_path,
+        policy=policy(),
+        signature_verifier=RecordingVerifier(),
+    )
+
+    assert result.approved is False
+    assert "release_gate_failed" in blocker_codes(result)
 
 
 @pytest.mark.parametrize("missing_name", REQUIRED_FILES)
@@ -546,7 +656,16 @@ def test_smoke_transcript_must_show_a_real_pass_for_the_exact_gguf(
     assert "smoke_test_invalid" in blocker_codes(decision)
 
 
-@pytest.mark.parametrize("surface", ("README.md", "benchmark-report.json", "smoke-test.json"))
+@pytest.mark.parametrize(
+    "surface",
+    (
+        "README.md",
+        "benchmark-report.json",
+        "smoke-test.json",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES",
+    ),
+)
 @pytest.mark.parametrize("identifier", ("forbidden-source", "FORBIDDEN-TEACHER"))
 def test_product_facing_files_are_brand_only(tmp_path: Path, surface: str, identifier: str) -> None:
     publications = publication_module()
@@ -562,6 +681,37 @@ def test_product_facing_files_are_brand_only(tmp_path: Path, surface: str, ident
 
     assert decision.approved is False
     assert "prohibited_identifier" in blocker_codes(decision)
+
+
+def test_gguf_printable_metadata_is_included_in_redaction_gate(tmp_path: Path) -> None:
+    publications = publication_module()
+    build_valid_bundle(tmp_path)
+    model = tmp_path / MODEL_NAME
+    model.write_bytes(model.read_bytes() + b"forbidden-source")
+
+    decision = publications.evaluate_publication_bundle(
+        tmp_path,
+        policy=policy(),
+        signature_verifier=RecordingVerifier(),
+    )
+
+    assert "prohibited_identifier" in blocker_codes(decision)
+
+
+def test_pinned_fingerprint_gate_cannot_be_weakened_by_caller_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publications = publication_module()
+    probe = "blockedterm"
+    monkeypatch.setattr(
+        publications,
+        "PINNED_PROHIBITED_FINGERPRINTS",
+        ((len(probe), sha256_bytes(probe.encode())),),
+    )
+    path = tmp_path / "LICENSE"
+    path.write_text("Blocked-term", encoding="utf-8")
+
+    assert publications._contains_pinned_fingerprint(path) is True
 
 
 def test_nested_extra_file_cannot_bypass_identifier_scan(tmp_path: Path) -> None:

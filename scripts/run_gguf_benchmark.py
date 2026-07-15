@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from metaflora_incubus.gguf_benchmark_runner import (
@@ -29,6 +30,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18081)
     parser.add_argument("--health-timeout", type=float, default=120.0)
     parser.add_argument("--request-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--runner-code-revision",
+        default=os.environ.get("INCUBUS_CODE_REVISION"),
+        required="INCUBUS_CODE_REVISION" not in os.environ,
+    )
     arguments = parser.parse_args()
 
     config = BenchmarkRunnerConfig.create(
@@ -42,6 +48,7 @@ def main() -> int:
         port=arguments.port,
         health_timeout_seconds=arguments.health_timeout,
         request_timeout_seconds=arguments.request_timeout,
+        runner_code_revision=arguments.runner_code_revision,
     )
     print(json.dumps(run_gguf_benchmark(config), sort_keys=True))
     return 0

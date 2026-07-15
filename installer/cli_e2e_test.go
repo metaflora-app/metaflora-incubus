@@ -165,6 +165,7 @@ func testBundleVariant(t *testing.T, includeRuntime bool) []byte {
 	}
 	if includeRuntime {
 		files["bin/incubus-runtime"] = "test runtime"
+		files["bin/llama-server"] = "test inference server"
 	}
 	for name, contents := range files {
 		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(contents))}
@@ -631,7 +632,10 @@ func TestLowDiskUpdateRequiresExplicitUninstallInsteadOfDeletingOldGGUF(t *testi
 	config.ManifestSignatureURL = next.signatureURL
 	config.PinnedPublicKey = next.publicKey
 	config.HTTPClient = next.client
-	freeBeforeRemoval := splitInstallReserveBytes + 4096 + uint64(len(testBundle(t))) + uint64(len("test model weights")) - 1
+	// This is deliberately below the signed runtime+model+reserve peak. Avoid
+	// recompressing a map-backed test archive here: tar entry order can change
+	// its compressed size and make the boundary assertion flaky.
+	freeBeforeRemoval := splitInstallReserveBytes
 	config.ProbeResources = func(context.Context, string) (Resources, error) {
 		return Resources{RAMBytes: 16 * giB, FreeDiskBytes: freeBeforeRemoval}, nil
 	}

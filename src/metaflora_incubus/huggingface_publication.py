@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from metaflora_incubus.benchmark_evidence import (
+    BenchmarkEvidenceError,
+    build_benchmark_evidence,
+)
 from metaflora_incubus.release_gates import (
     BenchmarkReport,
     ReleaseGatePolicy,
@@ -34,6 +38,8 @@ REQUIRED_FILES = (
     "benchmark-provenance.sig",
     "benchmark-cases.jsonl",
     "benchmark-raw.jsonl",
+    "benchmark-attestation.json",
+    "benchmark-attestation.sig",
     "smoke-test.json",
     "smoke-test.sig",
     "Modelfile",
@@ -48,6 +54,14 @@ PINNED_REQUIRED_METRICS = (
     "text_quality",
     "russian",
     "english",
+)
+PINNED_V1_DATASET_SHA256 = "9f18aba6bed35a1165cb5015ab10302f6a219c10ea1e564838a77cc3bcd75d49"
+PINNED_PROHIBITED_FINGERPRINTS = (
+    (12, "3a37ce8dacb7338f94cb5beefd914a0f517dc03ec7ee1faa7aafe46f85d0eb55"),
+    (4, "67f2d22514622d1be30c14ee9f3cb104503a159a33a656ca91a1953aa9616429"),
+    (8, "6f7ac1823da81d2e52d1a1549ee69c85bbf8bb56d06682849e7c09da2785ce3b"),
+    (4, "e4f9c522e1c89280e9561b825f4f24fe32b51ff82d61e5c2b1dfd0321c35a90b"),
+    (6, "7dd7122ad9bf240f04fdf988a0df4a2552098ad8ed8df429bed1056ebdb64387"),
 )
 
 
@@ -128,6 +142,8 @@ def evaluate_publication_bundle(
     policy: PublicationPolicy,
     signature_verifier: SignatureVerifier,
 ) -> PublicationDecision:
+    # Caller-provided verifiers are retained for API compatibility but never trusted.
+    signature_verifier = verify_production_signature
     blockers: list[PublicationBlocker] = []
     if not policy.prohibited_identifiers:
         blockers.append(
@@ -175,10 +191,16 @@ def evaluate_publication_bundle(
     _check_benchmark_links(bundle, artifact_sha, report, provenance, decision, blockers)
     _check_benchmark_evidence(bundle, report, provenance, blockers)
     _check_release_gate(report, blockers)
-    _check_smoke(smoke, artifact_sha, blockers)
+    _check_smoke(bundle, smoke, artifact_sha, blockers)
     _scan_public_surfaces(bundle, policy, blockers)
     result = tuple(blockers)
     return PublicationDecision(not result, result)
+
+
+def verify_production_signature(_purpose: str, payload: bytes, signature: bytes) -> bool:
+    from metaflora_incubus.benchmark_evidence import _verify_pinned_attestation_signature
+
+    return _verify_pinned_attestation_signature(payload, signature)
 
 
 def publish_to_huggingface(
@@ -276,6 +298,7 @@ def _check_release_gate(report: dict[str, object], blockers: list[PublicationBlo
         candidate = _benchmark_report(_mapping(gate_input["candidate"]), suite_id)
         deployable = _benchmark_report(_mapping(gate_input["deployable_candidate"]), suite_id)
         baseline_documents = _mapping(gate_input["baselines"])
+        _check_bound_gate_reports(gate_input, baseline_documents)
         baselines = {
             _required_text(name): _benchmark_report(_mapping(value), suite_id)
             for name, value in baseline_documents.items()
@@ -292,6 +315,34 @@ def _check_release_gate(report: dict[str, object], blockers: list[PublicationBlo
     if not gate_decision.approved:
         detail = ",".join(failure.code for failure in gate_decision.failures)
         blockers.append(PublicationBlocker("release_gate_failed", detail))
+
+
+def _check_bound_gate_reports(
+    gate_input: dict[str, object], baseline_documents: dict[str, object]
+) -> None:
+    documents = [_mapping(gate_input["candidate"])]
+    documents.extend(_mapping(value) for value in baseline_documents.values())
+    for document in documents:
+        binding = _mapping(document["evidence_binding"])
+        for field in ("artifact_sha256", "dataset_sha256", "raw_output_sha256"):
+            value = _required_text(binding[field])
+            if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"invalid evidence binding: {field}")
+        if binding["dataset_sha256"] != PINNED_V1_DATASET_SHA256:
+            raise ValueError("release gate report uses an unpinned case bank")
+        count = binding["sample_count"]
+        seeds = _sequence(binding["seeds"])
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+            or not seeds
+            or any(
+                not isinstance(seed, int) or isinstance(seed, bool) or seed < 0
+                for seed in seeds
+            )
+        ):
+            raise ValueError("invalid evidence binding counts")
 
 
 def _parse_release_policy(raw_policy: dict[str, object]) -> ReleaseGatePolicy:
@@ -463,55 +514,33 @@ def _check_benchmark_evidence(
         blockers.append(PublicationBlocker("benchmark_evidence_hash_mismatch", "cases/raw"))
         return
     try:
-        cases = _load_jsonl(cases_path)
-        raw = _load_jsonl(raw_path)
-        sample_count = provenance["sample_count"]
-        if not isinstance(sample_count, int) or isinstance(sample_count, bool):
-            raise ValueError("invalid sample count")
-        case_ids = {_required_text(item["case_id"]) for item in cases}
-        raw_ids = [_required_text(item["case_id"]) for item in raw]
-        if (
-            len(case_ids) != len(cases)
-            or len(set(raw_ids)) != len(raw)
-            or set(raw_ids) != case_ids
-            or sample_count != len(raw)
-        ):
-            raise ValueError("case IDs or sample count mismatch")
-        for item in cases:
-            _required_text(item["prompt"])
+        evidence = build_benchmark_evidence(cases_path, raw_path)
+        if evidence.dataset_sha256 != PINNED_V1_DATASET_SHA256:
+            raise ValueError("unpinned benchmark case bank")
+        if provenance["sample_count"] != evidence.sample_count:
+            raise ValueError("sample count mismatch")
+        if provenance.get("attestation_sha256") != evidence.attestation_sha256:
+            raise ValueError("attestation hash mismatch")
         gate_input = _mapping(report["gate_input"])
         deployable = _mapping(gate_input["deployable_candidate"])
         expected_scores = _mapping(deployable["scores"])
-        measured: dict[str, list[float]] = {name: [] for name in PINNED_REQUIRED_METRICS}
-        refusals: list[bool] = []
-        for item in raw:
-            _required_text(item["response"])
-            row_scores = _mapping(item["scores"])
-            dimension = item.get("dimension")
-            metrics = (
-                (dimension,)
-                if isinstance(dimension, str) and dimension in PINNED_REQUIRED_METRICS
-                else PINNED_REQUIRED_METRICS
-            )
-            for metric in metrics:
-                score = _number(row_scores[metric])
-                if not 0 <= score <= 1:
-                    raise ValueError("score out of range")
-                measured[metric].append(score)
-            refused = item["refused"]
-            if not isinstance(refused, bool):
-                raise ValueError("invalid refusal label")
-            refusals.append(refused)
-        for metric, values in measured.items():
-            if not values:
-                raise ValueError(f"missing metric rows: {metric}")
-            observed = sum(values) / len(values)
+        for metric, observed in evidence.scores.items():
             if abs(observed - _number(expected_scores[metric])) > 1e-12:
                 raise ValueError(f"aggregate mismatch: {metric}")
-        refusal_rate = sum(refusals) / len(refusals)
-        if abs(refusal_rate - _number(deployable["overrefusal_rate"])) > 1e-12:
+        if abs(evidence.overrefusal_rate - _number(deployable["overrefusal_rate"])) > 1e-12:
             raise ValueError("aggregate mismatch: overrefusal")
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        binding = _mapping(deployable["evidence_binding"])
+        if binding != {
+            "artifact_sha256": evidence.artifact_sha256,
+            "dataset_sha256": evidence.dataset_sha256,
+            "raw_output_sha256": evidence.raw_output_sha256,
+            "sample_count": evidence.sample_count,
+            "seeds": list(evidence.seeds),
+            "runner_code_revision": evidence.runner_code_revision,
+            "attestation_sha256": evidence.attestation_sha256,
+        }:
+            raise ValueError("deployable evidence binding mismatch")
+    except (BenchmarkEvidenceError, KeyError, TypeError, ValueError, ZeroDivisionError):
         blockers.append(PublicationBlocker("benchmark_evidence_invalid", "cases/raw"))
 
 
@@ -530,17 +559,32 @@ def _load_jsonl(path: Path) -> list[dict[str, object]]:
 
 
 def _check_smoke(
+    bundle: Path,
     smoke: dict[str, object],
     artifact_sha: str,
     blockers: list[PublicationBlocker],
 ) -> None:
-    if (
+    valid = (
         smoke.get("artifact_sha256") != artifact_sha
         or smoke.get("status") != "passed"
+        or not isinstance(smoke.get("case_id"), str)
         or not isinstance(smoke.get("request"), str)
         or not isinstance(smoke.get("response"), str)
         or not str(smoke.get("response")).strip()
-    ):
+    )
+    try:
+        cases = {row["case_id"]: row for row in _load_jsonl(bundle / "benchmark-cases.jsonl")}
+        raw = {row["case_id"]: row for row in _load_jsonl(bundle / "benchmark-raw.jsonl")}
+        case_id = smoke["case_id"]
+        valid = valid or (
+            case_id not in cases
+            or case_id not in raw
+            or smoke.get("request") != cases[case_id].get("prompt")
+            or smoke.get("response") != raw[case_id].get("response")
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        valid = True
+    if valid:
         blockers.append(PublicationBlocker("smoke_test_invalid", "smoke-test.json"))
 
 
@@ -566,11 +610,13 @@ def _scan_public_surfaces(
     for name in sorted(actual_files ^ expected_files):
         blockers.append(PublicationBlocker("undeclared_or_unsafe_file", name))
 
-    legal_exemptions = {"LICENSE", "THIRD_PARTY_NOTICES"}
     for path in bundle.rglob("*"):
-        if not path.is_file() or path.name in legal_exemptions or path.suffix == ".sig":
+        if not path.is_file():
             continue
         relative_name = str(path.relative_to(bundle))
+        if _contains_pinned_fingerprint(path):
+            blockers.append(PublicationBlocker("prohibited_identifier", relative_name))
+            continue
         for identifier in policy.prohibited_identifiers:
             if _file_contains(path, identifier.encode()):
                 blockers.append(PublicationBlocker("prohibited_identifier", relative_name))
@@ -624,3 +670,89 @@ def _file_contains(path: Path, needle: bytes) -> bool:
     except OSError:
         return False
     return False
+
+
+def _contains_pinned_fingerprint(path: Path) -> bool:
+    windows: dict[int, set[str]] = {}
+    for length, digest in PINNED_PROHIBITED_FINGERPRINTS:
+        windows.setdefault(length, set()).add(digest)
+    maximum = max(windows)
+    tail = ""
+    for chunk in _public_surface_chunks(path):
+        normalized = "".join(chr(byte + 32) if 65 <= byte <= 90 else chr(byte) for byte in chunk)
+        normalized = "".join(
+            character
+            for character in normalized
+            if character.isascii() and character.isalnum()
+        )
+        combined = tail + normalized
+        for length, expected in windows.items():
+            for offset in range(max(0, len(tail) - length + 1), len(combined) - length + 1):
+                candidate = combined[offset : offset + length].encode("ascii")
+                if hashlib.sha256(candidate).hexdigest() in expected:
+                    return True
+        tail = combined[-(maximum - 1) :]
+    return False
+
+
+def _public_surface_chunks(path: Path):
+    if path.suffix.casefold() != ".gguf":
+        with path.open("rb") as handle:
+            yield from iter(lambda: handle.read(1024 * 1024), b"")
+        return
+    try:
+        yield from _gguf_metadata_chunks(path)
+    except (OSError, ValueError):
+        with path.open("rb") as handle:
+            yield handle.read(1024 * 1024)
+
+
+def _gguf_metadata_chunks(path: Path):
+    with path.open("rb") as handle:
+        if handle.read(4) != b"GGUF":
+            raise ValueError("invalid GGUF")
+        version = int.from_bytes(handle.read(4), "little")
+        if version not in {2, 3}:
+            raise ValueError("unsupported GGUF")
+        _read_exact(handle, 8)
+        metadata_count = int.from_bytes(_read_exact(handle, 8), "little")
+        if metadata_count > 100_000:
+            raise ValueError("unreasonable GGUF metadata")
+        for _ in range(metadata_count):
+            key = _read_gguf_string(handle)
+            yield key
+            value_type = int.from_bytes(_read_exact(handle, 4), "little")
+            yield from _read_gguf_value_text(handle, value_type)
+
+
+def _read_gguf_value_text(handle, value_type: int):
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    if value_type in sizes:
+        _read_exact(handle, sizes[value_type])
+        return
+    if value_type == 8:
+        yield _read_gguf_string(handle)
+        return
+    if value_type == 9:
+        element_type = int.from_bytes(_read_exact(handle, 4), "little")
+        count = int.from_bytes(_read_exact(handle, 8), "little")
+        if count > 10_000_000:
+            raise ValueError("unreasonable GGUF metadata array")
+        for _ in range(count):
+            yield from _read_gguf_value_text(handle, element_type)
+        return
+    raise ValueError("unsupported GGUF metadata type")
+
+
+def _read_gguf_string(handle) -> bytes:
+    length = int.from_bytes(_read_exact(handle, 8), "little")
+    if length > 16 * 1024 * 1024:
+        raise ValueError("unreasonable GGUF metadata string")
+    return _read_exact(handle, length)
+
+
+def _read_exact(handle, size: int) -> bytes:
+    value = handle.read(size)
+    if len(value) != size:
+        raise ValueError("truncated GGUF metadata")
+    return value
