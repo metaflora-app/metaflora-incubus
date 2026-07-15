@@ -402,6 +402,7 @@ class HuggingFacePrivateCheckpointStore:
             revision=self._target.branch,
             folder_path=str(source),
             path_in_repo=f"runs/{self._run_id}",
+            delete_patterns="**",
             commit_message=f"Checkpoint {self._run_id}",
         )
 

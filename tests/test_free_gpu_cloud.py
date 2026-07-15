@@ -648,6 +648,27 @@ def test_cloud_huggingface_clients_use_cached_auth_and_early_whoami(
     assert constructor_tokens == [None, None]
 
 
+def test_private_checkpoint_sync_deletes_stale_remote_files(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeApi:
+        def upload_folder(self, **kwargs):
+            calls.append(kwargs)
+
+    store = object.__new__(HuggingFacePrivateCheckpointStore)
+    store._api = FakeApi()
+    store._target = types.SimpleNamespace(
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    store._run_id = "incubus-v1-run"
+    store.ensure_private = lambda: None
+
+    store.sync(tmp_path)
+
+    assert calls[0]["delete_patterns"] == "**"
+
+
 def test_native_process_environment_and_benchmark_hide_cached_hub_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
