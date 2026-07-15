@@ -64,7 +64,7 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert 'f"{candidate_remote_prefix}/candidate-export.json"' in raw
     assert "runs/incubus-v1-run/artifacts/metaflora-incubus-v1.gguf" in raw
     assert "runs/incubus-v1-run/artifacts/artifact-metadata.json" in raw
-    assert "runs/incubus-v1-run/artifacts/llama-server" in raw
+    assert "runs/incubus-v1-run/artifacts/llama-server" not in raw
     assert "INCUBUS_CANDIDATE_GGUF" not in raw
     assert "INCUBUS_INCUMBENT_GGUF" not in raw
     assert "INCUBUS_LLAMA_SERVER" not in raw
@@ -73,18 +73,25 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert 'code_revision = "7ec9bcd46001b0ecd8d15e83203835f06dca59ea"' in raw
 
 
-def test_notebook_verifies_restored_receipts_and_builds_server_as_fallback() -> None:
+def test_notebook_builds_a_pinned_local_cuda_server_with_actionable_logs() -> None:
     raw = notebook_source()
 
     assert 'candidate_receipt["artifact"]["sha256"]' in raw
     assert 'candidate_upload_receipt["artifact_sha256"]' in raw
     assert 'candidate_upload_receipt["artifact_size_bytes"]' in raw
     assert 'incumbent_receipt["artifact_sha256"]' in raw
-    assert 'incumbent_receipt["benchmark"]["runtime_sha256"]' in raw
     assert "chmod(0o700)" in raw
+    assert "llama.cpp-head-to-head" in raw
+    assert "llama_cpp_revision" in raw
+    assert "llama.cpp revision is not pinned" in raw
+    assert "llama.cpp checkout verification failed" in raw
     assert '"cmake"' in raw
     assert '"--target", "llama-server"' in raw
     assert '"-DGGML_CUDA=ON"' in raw
+    assert "llama-server-build.log" in raw
+    assert "llama-server build failed" in raw
+    assert 'server_name = "runs/incubus-v1-run/artifacts/llama-server"' not in raw
+    assert "restored_server" not in raw
 
 
 def test_notebook_runs_private_harness_and_writes_hard_case_evidence() -> None:
