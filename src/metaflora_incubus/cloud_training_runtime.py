@@ -605,6 +605,7 @@ def execute_training_and_build(
         local_files_only=True,
         trust_remote_code=False,
         use_safetensors=True,
+        dtype=torch.float16,
         quantization_config=quantization,
         device_map={"": 0},
     )

@@ -511,6 +511,7 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert source.count("save_total_limit=2") == 2
     assert "learning_rate=5e-6" in source
     assert "save_safetensors=True" not in source
+    assert source.count("dtype=torch.float16") == 2
 
 
 def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path: Path) -> None:
