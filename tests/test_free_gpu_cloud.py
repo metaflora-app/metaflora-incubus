@@ -609,11 +609,14 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert "max_steps=32" in source
     assert "save_steps=8" in source
     assert "gradient_accumulation_steps=4" in source
-    assert "max_steps=8 if refinement else 12" in source
-    assert "save_steps=4 if refinement else 3" in source
+    assert "max_steps=32 if refinement else 12" in source
+    assert "save_steps=8 if refinement else 3" in source
     assert "gradient_accumulation_steps=2" in source
     assert source.count("save_total_limit=2") == 2
     assert "learning_rate=2e-6 if refinement else 5e-6" in source
+    assert "precompute_ref_log_probs=refinement" in source
+    assert "precompute_ref_batch_size=4 if refinement else None" in source
+    assert "min(len(preference_train_dataset), 512)" in source
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
     assert source.count("_cast_trainable_parameters_to_fp32(") == 3
@@ -653,9 +656,7 @@ def test_trainable_bfloat16_parameters_are_cast_before_amp_scaling() -> None:
     trainable = FakeParameter(dtype="bf16", requires_grad=True)
     frozen = FakeParameter(dtype="bf16", requires_grad=False)
 
-    _cast_trainable_parameters_to_fp32(
-        FakeModel([trainable, frozen]), torch_module=torch_module
-    )
+    _cast_trainable_parameters_to_fp32(FakeModel([trainable, frozen]), torch_module=torch_module)
 
     assert trainable.dtype == "fp32"
     assert frozen.dtype == "bf16"

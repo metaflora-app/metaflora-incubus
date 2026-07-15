@@ -586,9 +586,7 @@ def require_benchmark_isolation(*, dataset_root: Path, cases_path: Path) -> None
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CloudConstraintError("benchmark isolation inputs are invalid") from exc
-    benchmark_prompts = {
-        _normalized_text(str(row.get("prompt", ""))) for row in benchmark_rows
-    }
+    benchmark_prompts = {_normalized_text(str(row.get("prompt", ""))) for row in benchmark_rows}
     for row in preference_rows:
         prompt = _message_list(row, "prompt")[0]["content"]
         if _normalized_text(prompt) in benchmark_prompts:
@@ -980,9 +978,7 @@ def execute_training_and_build(
             "parent_adapter_sha256": hashlib.sha256(
                 json.dumps(parent_files, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
-            "parent_manifest_sha256": _sha256_file(
-                restored_parent / _CHECKPOINT_MANIFEST
-            ),
+            "parent_manifest_sha256": _sha256_file(restored_parent / _CHECKPOINT_MANIFEST),
             "parent_run_id": plan.parent_run_id,
         }
         parent_adapter = restored_parent / "final-adapter"
@@ -1145,12 +1141,17 @@ def execute_training_and_build(
         torch.cuda.empty_cache()
     refinement = parent_adapter is not None
     preference_seed = 1703 if refinement else 1702
+    preference_train_dataset = _mixed_dataset(
+        load_dataset, interleave_datasets, data / "preference.jsonl", preference_seed
+    )
+    if refinement:
+        preference_train_dataset = preference_train_dataset.shuffle(seed=preference_seed).select(
+            range(min(len(preference_train_dataset), 512))
+        )
     preference = DPOTrainer(
         model=model,
         processing_class=tokenizer,
-        train_dataset=_mixed_dataset(
-            load_dataset, interleave_datasets, data / "preference.jsonl", preference_seed
-        ),
+        train_dataset=preference_train_dataset,
         eval_dataset=_mixed_dataset(
             load_dataset,
             interleave_datasets,
@@ -1161,14 +1162,16 @@ def execute_training_and_build(
         args=DPOConfig(
             output_dir=str(preference_output),
             max_length=training_length,
-            max_steps=8 if refinement else 12,
-            save_steps=4 if refinement else 3,
+            max_steps=32 if refinement else 12,
+            save_steps=8 if refinement else 3,
             save_total_limit=2,
             per_device_train_batch_size=1,
             gradient_accumulation_steps=2,
             learning_rate=2e-6 if refinement else 5e-6,
             fp16=True,
             gradient_checkpointing=True,
+            precompute_ref_log_probs=refinement,
+            precompute_ref_batch_size=4 if refinement else None,
             report_to="none",
             seed=preference_seed,
             data_seed=preference_seed,
