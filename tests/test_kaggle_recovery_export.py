@@ -507,7 +507,7 @@ def test_kaggle_notebook_is_recovery_only_and_resource_guarded() -> None:
     )
     assert 'git", "-C", str(repository), "rev-parse", "HEAD' in code
     assert "checked_out != revision" in code
-    assert code.index('"uninstall", "-y", "torchvision", "torchaudio"') < code.index(
+    assert code.index('"uninstall", "-y", "torchvision", "torchaudio", "torchao"') < code.index(
         '"install", "--require-hashes"'
     )
     assert '"-e", str(repository)' not in code
