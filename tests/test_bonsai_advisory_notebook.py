@@ -73,6 +73,17 @@ def test_bonsai_notebook_builds_a_pinned_local_cuda_server_with_actionable_logs(
     assert "restored llama-server" not in raw
 
 
+def test_bonsai_notebook_falls_back_to_cpu_when_kaggle_cuda_cmake_is_unavailable() -> None:
+    raw = notebook_source()
+
+    assert "cuda_configure" in raw
+    assert "cuda_compile" in raw
+    assert "cpu_fallback" in raw
+    assert "-DGGML_CUDA=OFF" in raw
+    assert "server_backend == 'cuda' else 0" in raw
+    assert "CPU fallback build failed" in raw
+
+
 def test_bonsai_notebook_is_advisory_only_and_keeps_mandatory_h2h_separate() -> None:
     raw = notebook_source()
 
