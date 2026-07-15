@@ -55,8 +55,11 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
     commands: list[list[str]] = []
 
     def fake_run(command: list[str], *, cwd=None) -> None:
-        del cwd
         commands.append(command)
+        if command[:2] == ["cmake", "--build"]:
+            server = Path(cwd) / "build/bin/llama-server"
+            server.parent.mkdir(parents=True, exist_ok=True)
+            server.write_bytes(b"server")
         if command[-1] == "Q5_K_M":
             output = Path(command[-2])
             output.touch()
@@ -82,7 +85,15 @@ def test_cloud_export_invokes_q5_quantizer_and_preserves_release_filename(
         "llama-server",
         "llama-export-lora",
         "llama-quantize",
-        "-j2",
+        "-j1",
+    ] in commands
+    assert [
+        "cmake",
+        "-B",
+        "build",
+        "-DLLAMA_CURL=OFF",
+        "-DGGML_CUDA=ON",
+        "-DBUILD_SHARED_LIBS=OFF",
     ] in commands
     assert any(command[-1] == "Q5_K_M" for command in commands)
     assert not any(command[-1] == "Q4_K_M" for command in commands)

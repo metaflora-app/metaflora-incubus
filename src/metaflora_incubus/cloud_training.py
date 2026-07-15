@@ -365,6 +365,27 @@ class HuggingFacePrivateCheckpointStore:
         )
 
     def restore(self, destination: Path) -> Path | None:
+        return self._restore_with_patterns(
+            destination,
+            allow_patterns=f"runs/{self._run_id}/**",
+        )
+
+    def restore_recovery(self, destination: Path) -> Path | None:
+        """Restore only the authenticated adapter and resumable release artifacts."""
+
+        prefix = f"runs/{self._run_id}"
+        return self._restore_with_patterns(
+            destination,
+            allow_patterns=(
+                f"{prefix}/incubus-checkpoint-manifest.json",
+                f"{prefix}/final-adapter/**",
+                f"{prefix}/artifacts/**",
+            ),
+        )
+
+    def _restore_with_patterns(
+        self, destination: Path, *, allow_patterns: str | tuple[str, ...]
+    ) -> Path | None:
         from huggingface_hub import snapshot_download
 
         self.ensure_private()
@@ -375,7 +396,7 @@ class HuggingFacePrivateCheckpointStore:
             snapshot_download(
                 repo_id=self._target.location,
                 revision=self._target.branch,
-                allow_patterns=f"runs/{self._run_id}/**",
+                allow_patterns=allow_patterns,
                 local_dir=staging,
                 token=None,
             )
@@ -391,7 +412,7 @@ class HuggingFacePrivateCheckpointStore:
             return None
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(restored, destination)
+        restored.replace(destination)
         shutil.rmtree(staging)
         return destination
 

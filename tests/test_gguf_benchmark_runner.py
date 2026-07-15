@@ -124,6 +124,8 @@ def test_runner_starts_pinned_server_and_writes_bound_evidence(tmp_path: Path) -
     assert command[0] == str(active_config.server_binary)
     assert command[command.index("--model") + 1] == str(active_config.model_path)
     assert command[command.index("--seed") + 1] == "4242"
+    assert command[command.index("--gpu-layers") + 1] == "999"
+    assert command[command.index("--ctx-size") + 1] == "4096"
     assert "HF_TOKEN" not in environment
     assert len(posts) == 48
     assert all(

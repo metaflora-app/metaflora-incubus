@@ -90,6 +90,11 @@ def _cast_trainable_parameters_to_fp32(model, *, torch_module) -> None:
 
 
 _CHECKPOINT_MANIFEST = "incubus-checkpoint-manifest.json"
+_TRAINING_CHECKPOINT_FILE = re.compile(r"(?:sft|preference)/checkpoint-[0-9]+/.+")
+
+
+def _is_prunable_training_file(name: str) -> bool:
+    return _TRAINING_CHECKPOINT_FILE.fullmatch(name) is not None
 
 
 def _checkpoint_file_hashes(root: Path) -> dict[str, str]:
@@ -137,7 +142,13 @@ def _write_checkpoint_manifest(root: Path, *, binding: Mapping[str, str], key: s
     temporary.replace(root / _CHECKPOINT_MANIFEST)
 
 
-def _verify_checkpoint_manifest(root: Path, *, binding: Mapping[str, str], key: str) -> None:
+def _verify_checkpoint_manifest(
+    root: Path,
+    *,
+    binding: Mapping[str, str],
+    key: str,
+    allow_prunable_training_files: bool = False,
+) -> None:
     try:
         document = json.loads((root / _CHECKPOINT_MANIFEST).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -145,7 +156,25 @@ def _verify_checkpoint_manifest(root: Path, *, binding: Mapping[str, str], key: 
     if document.get("schema_version") != 1 or document.get("binding") != dict(binding):
         raise CloudConstraintError("checkpoint binding does not match this training run")
     recorded_files = document.get("files")
-    if not isinstance(recorded_files, dict) or recorded_files != _checkpoint_file_hashes(root):
+    actual_files = _checkpoint_file_hashes(root)
+    if not isinstance(recorded_files, dict):
+        raise CloudConstraintError("checkpoint integrity verification failed")
+    missing = set(recorded_files).difference(actual_files)
+    if missing and (
+        not allow_prunable_training_files
+        or any(not _is_prunable_training_file(name) for name in missing)
+    ):
+        raise CloudConstraintError("checkpoint integrity verification failed")
+    if any(
+        actual_files[name] != recorded_files[name]
+        for name in set(recorded_files).intersection(actual_files)
+    ):
+        raise CloudConstraintError("checkpoint integrity verification failed")
+    untracked = set(actual_files).difference(recorded_files)
+    if untracked and (
+        not allow_prunable_training_files
+        or any(not _is_prunable_training_file(name) for name in untracked)
+    ):
         raise CloudConstraintError("checkpoint integrity verification failed")
     payload = _checkpoint_payload(binding=binding, files=recorded_files)
     expected = hmac.new(_checkpoint_key(key), payload, hashlib.sha256).hexdigest()
@@ -172,7 +201,12 @@ def _authenticated_recovery_binding(
     ):
         raise CloudConstraintError("checkpoint recovery binding is invalid")
     authenticated = dict(binding)
-    _verify_checkpoint_manifest(root, binding=authenticated, key=checkpoint_key)
+    _verify_checkpoint_manifest(
+        root,
+        binding=authenticated,
+        key=checkpoint_key,
+        allow_prunable_training_files=True,
+    )
     if authenticated.get("run_id") != run_id:
         raise CloudConstraintError("checkpoint recovery run identity does not match")
     source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
@@ -303,7 +337,8 @@ def _prepare_ephemeral_workspace(
     if before_restore is not None:
         before_restore()
     checkpoint_root = plan.workspace / "checkpoints"
-    restored = store.restore(checkpoint_root)
+    restore = getattr(store, "restore_recovery", store.restore)
+    restored = restore(checkpoint_root)
     if restored is not None:
         _verify_checkpoint_manifest(restored, binding=binding, key=checkpoint_key)
     return restored
@@ -452,7 +487,17 @@ def _build_gguf(
         ]
     )
     _checkout_pinned_revision(llama_cpp, plan.config.llama_cpp_revision)
-    _run(["cmake", "-B", "build", "-DLLAMA_CURL=OFF"], cwd=llama_cpp)
+    _run(
+        [
+            "cmake",
+            "-B",
+            "build",
+            "-DLLAMA_CURL=OFF",
+            "-DGGML_CUDA=ON",
+            "-DBUILD_SHARED_LIBS=OFF",
+        ],
+        cwd=llama_cpp,
+    )
     _run(
         [
             "cmake",
@@ -464,11 +509,14 @@ def _build_gguf(
             "llama-server",
             "llama-export-lora",
             "llama-quantize",
-            "-j2",
+            "-j1",
         ],
         cwd=llama_cpp,
     )
     artifacts.mkdir(parents=True, exist_ok=True)
+    benchmark_server = artifacts / "llama-server"
+    shutil.copy2(llama_cpp / "build/bin/llama-server", benchmark_server)
+    benchmark_server.chmod(0o755)
     base = artifacts / "base-f16.gguf"
     lora = artifacts / "adapter.gguf"
     merged = artifacts / "merged-f16.gguf"
@@ -495,6 +543,8 @@ def _build_gguf(
             str(adapter),
         ]
     )
+    if source.is_dir():
+        shutil.rmtree(source)
     _run(
         [
             str(llama_cpp / "build/bin/llama-export-lora"),
@@ -506,14 +556,19 @@ def _build_gguf(
             str(lora),
         ]
     )
-    _run(
-        [
-            str(llama_cpp / "build/bin/llama-quantize"),
-            str(merged),
-            str(final),
-            plan.final_gguf_quantization,
-        ]
-    )
+    base.unlink(missing_ok=True)
+    lora.unlink(missing_ok=True)
+    try:
+        _run(
+            [
+                str(llama_cpp / "build/bin/llama-quantize"),
+                str(merged),
+                str(final),
+                plan.final_gguf_quantization,
+            ]
+        )
+    finally:
+        merged.unlink(missing_ok=True)
     if (
         not final.is_file()
         or not MIN_MODEL_BYTES
@@ -523,9 +578,6 @@ def _build_gguf(
         raise CloudConstraintError(
             f"{plan.final_gguf_quantization} GGUF must remain inside the 2.5-5 GiB cloud range"
         )
-    base.unlink(missing_ok=True)
-    lora.unlink(missing_ok=True)
-    merged.unlink(missing_ok=True)
     return final
 
 
@@ -537,6 +589,38 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _reusable_final_gguf(*, plan: CloudExecutionPlan, checkpoint_root: Path) -> Path | None:
+    """Return a complete private GGUF that can safely skip another export."""
+
+    artifact = checkpoint_root / "artifacts" / "metaflora-incubus-v1.gguf"
+    if not artifact.is_file():
+        return None
+    size = artifact.stat().st_size
+    if not MIN_MODEL_BYTES <= size <= plan.config.profile.final_gguf_max_bytes:
+        return None
+    if not (artifact.parent / "llama-server").is_file():
+        return None
+    return artifact
+
+
+def _write_artifact_state(
+    *, checkpoint_root: Path, final: Path, phase: str
+) -> dict[str, object]:
+    state = {
+        "artifact_sha256": _sha256_file(final),
+        "artifact_size_bytes": final.stat().st_size,
+        "phase": phase,
+        "schema_version": 1,
+    }
+    path = checkpoint_root / "artifacts" / "recovery-state.json"
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+    return state
+
+
 def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[str, object]:
     """Run the committed release cases before the cloud workspace can be removed."""
     from metaflora_incubus.gguf_benchmark_runner import (
@@ -544,7 +628,13 @@ def _benchmark_final_gguf(*, plan: CloudExecutionPlan, artifact: Path) -> dict[s
         run_gguf_benchmark,
     )
 
-    server = plan.workspace / "llama.cpp" / "build" / "bin" / "llama-server"
+    synced_server = artifact.parent / "llama-server"
+    server = (
+        synced_server
+        if synced_server.is_file()
+        else plan.workspace / "llama.cpp" / "build" / "bin" / "llama-server"
+    )
+    server.chmod(0o755)
     cases = Path(__file__).resolve().parents[2] / "benchmarks" / "gguf-v1-cases.jsonl"
     output = artifact.parent / "benchmark-final"
     config = BenchmarkRunnerConfig.create(
@@ -580,9 +670,9 @@ def recover_trained_artifact(
     if plan.workspace.exists() or plan.workspace.is_symlink():
         safe_ephemeral_cleanup(plan)
     plan.workspace.mkdir(parents=False, exist_ok=False)
-    validate_cloud_disk_preflight(plan, available_bytes=_available_workspace_bytes(plan))
     checkpoint_root = plan.workspace / "checkpoints"
-    restored = store.restore(checkpoint_root)
+    restore = getattr(store, "restore_recovery", None) or store.restore
+    restored = restore(checkpoint_root)
     if restored is None or not (checkpoint_root / "final-adapter").is_dir():
         raise CloudConstraintError("authenticated final adapter is missing")
     binding = _authenticated_recovery_binding(
@@ -591,28 +681,42 @@ def recover_trained_artifact(
         checkpoint_key=checkpoint_key,
         run_id=plan.run_id,
     )
-    source = plan.workspace / "source"
-    snapshot_download(
-        repo_id=source_repo,
-        revision=source_revision,
-        token=None,
-        local_dir=source,
-        allow_patterns=(
-            "*.safetensors",
-            "*.json",
-            "tokenizer.model",
-            "*.tiktoken",
-            "vocab.*",
-            "merges.txt",
-        ),
-    )
-    with _hidden_huggingface_credentials(Path.home()):
-        final = _build_gguf(
-            plan=plan,
-            source=source,
-            adapter=checkpoint_root / "final-adapter",
-            artifacts=checkpoint_root / "artifacts",
+    for training_directory in (checkpoint_root / "sft", checkpoint_root / "preference"):
+        if training_directory.is_dir():
+            shutil.rmtree(training_directory)
+    final = _reusable_final_gguf(plan=plan, checkpoint_root=checkpoint_root)
+    if final is None:
+        validate_cloud_disk_preflight(plan, available_bytes=_available_workspace_bytes(plan))
+        source = plan.workspace / "source"
+        snapshot_download(
+            repo_id=source_repo,
+            revision=source_revision,
+            token=None,
+            local_dir=source,
+            allow_patterns=(
+                "*.safetensors",
+                "*.json",
+                "tokenizer.model",
+                "*.tiktoken",
+                "vocab.*",
+                "merges.txt",
+            ),
         )
+        with _hidden_huggingface_credentials(Path.home()):
+            final = _build_gguf(
+                plan=plan,
+                source=source,
+                adapter=checkpoint_root / "final-adapter",
+                artifacts=checkpoint_root / "artifacts",
+            )
+            _write_artifact_state(
+                checkpoint_root=checkpoint_root,
+                final=final,
+                phase="artifact_built",
+            )
+        _write_checkpoint_manifest(checkpoint_root, binding=binding, key=checkpoint_key)
+        store.sync(checkpoint_root)
+    with _hidden_huggingface_credentials(Path.home()):
         benchmark = _benchmark_final_gguf(plan=plan, artifact=final)
     metadata = {
         "artifact_sha256": _sha256_file(final),
@@ -626,6 +730,11 @@ def recover_trained_artifact(
         json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n",
         encoding="utf-8",
+    )
+    _write_artifact_state(
+        checkpoint_root=checkpoint_root,
+        final=final,
+        phase="benchmark_complete",
     )
     _write_checkpoint_manifest(checkpoint_root, binding=binding, key=checkpoint_key)
     store.sync(checkpoint_root)

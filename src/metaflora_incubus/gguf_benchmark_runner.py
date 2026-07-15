@@ -363,6 +363,10 @@ def _server_command(config: BenchmarkRunnerConfig) -> list[str]:
         "0",
         "--parallel",
         "1",
+        "--gpu-layers",
+        "999",
+        "--ctx-size",
+        "4096",
     ]
 
 

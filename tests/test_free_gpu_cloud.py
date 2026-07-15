@@ -261,6 +261,43 @@ def test_final_cloud_artifact_runs_pinned_local_benchmark(
     assert evidence["case_count"] == 48
 
 
+def test_recovered_artifact_uses_synced_benchmark_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(load_cloud_config(CONFIG_PATH), workspace=tmp_path / "cloud")
+    target = RemoteCheckpointTarget.create(
+        backend=CheckpointBackend.HF_PRIVATE_BRANCH,
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    plan = CloudExecutionPlan.create(
+        config=config,
+        checkpoint_target=target,
+        run_id="benchmark-recovered",
+        parameter_count=4_659_865_088,
+        vram_bytes=16 * 1024**3,
+    )
+    artifact = tmp_path / "artifacts" / "metaflora-incubus-v1.gguf"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"GGUFmodel")
+    synced_server = artifact.parent / "llama-server"
+    synced_server.write_bytes(b"synced-server")
+    captured: dict[str, object] = {}
+
+    def fake_run(runner_config):
+        captured["config"] = runner_config
+        return {"case_count": 48}
+
+    monkeypatch.setattr(
+        "metaflora_incubus.gguf_benchmark_runner.run_gguf_benchmark",
+        fake_run,
+    )
+
+    _benchmark_final_gguf(plan=plan, artifact=artifact)
+
+    assert captured["config"].server_binary == synced_server
+
+
 def test_cloud_disk_preflight_calculates_full_peak_and_fails_fast() -> None:
     config = load_cloud_config(CONFIG_PATH)
     target = RemoteCheckpointTarget.create(
@@ -516,7 +553,12 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
     assert source.count("_cast_trainable_parameters_to_fp32(") == 3
-    assert "model = sft.model\n        sft = None\n        gc.collect()\n        torch.cuda.empty_cache()" in source
+    assert (
+        "model = sft.model\n"
+        "        sft = None\n"
+        "        gc.collect()\n"
+        "        torch.cuda.empty_cache()"
+    ) in source
 
 
 def test_trainable_bfloat16_parameters_are_cast_before_amp_scaling() -> None:
@@ -667,6 +709,44 @@ def test_private_checkpoint_sync_deletes_stale_remote_files(tmp_path: Path) -> N
     store.sync(tmp_path)
 
     assert calls[0]["delete_patterns"] == "**"
+
+
+def test_private_recovery_restore_downloads_only_release_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        staging = Path(kwargs["local_dir"])
+        restored = staging / "runs" / "incubus-v1-run"
+        (restored / "final-adapter").mkdir(parents=True)
+        (restored / "final-adapter" / "adapter_model.safetensors").write_bytes(b"x")
+        (restored / "incubus-checkpoint-manifest.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        types.SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+    store = object.__new__(HuggingFacePrivateCheckpointStore)
+    store._target = types.SimpleNamespace(
+        location="private-owner/private-checkpoints",
+        branch="incubus-training-v1",
+    )
+    store._run_id = "incubus-v1-run"
+    store.ensure_private = lambda: None
+    destination = tmp_path / "checkpoints"
+
+    restored = store.restore_recovery(destination)
+
+    assert restored == destination
+    assert (destination / "final-adapter" / "adapter_model.safetensors").is_file()
+    assert calls[0]["allow_patterns"] == (
+        "runs/incubus-v1-run/incubus-checkpoint-manifest.json",
+        "runs/incubus-v1-run/final-adapter/**",
+        "runs/incubus-v1-run/artifacts/**",
+    )
 
 
 def test_native_process_environment_and_benchmark_hide_cached_hub_credentials(
