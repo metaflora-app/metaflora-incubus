@@ -930,6 +930,10 @@ def execute_training_and_build(
     )
     from trl import DPOConfig, DPOTrainer, SFTConfig, SFTTrainer
 
+    from metaflora_incubus.preference_preprocessing import build_prefix_stable_dpo_trainer
+
+    DPOTrainer = build_prefix_stable_dpo_trainer(DPOTrainer)
+
     if not torch.cuda.is_available():
         raise CloudConstraintError("CUDA GPU is required")
     source_repo = _required(environment, "INCUBUS_SOURCE_REPO")
@@ -1140,6 +1144,7 @@ def execute_training_and_build(
         gc.collect()
         torch.cuda.empty_cache()
     refinement = parent_adapter is not None
+    preference_length = min(training_length, 512) if refinement else training_length
     preference_seed = 1703 if refinement else 1702
     preference_train_dataset = _mixed_dataset(
         load_dataset, interleave_datasets, data / "preference.jsonl", preference_seed
@@ -1161,7 +1166,7 @@ def execute_training_and_build(
         callbacks=[callback],
         args=DPOConfig(
             output_dir=str(preference_output),
-            max_length=training_length,
+            max_length=preference_length,
             max_steps=32 if refinement else 12,
             save_steps=8 if refinement else 3,
             save_total_limit=2,
@@ -1178,6 +1183,8 @@ def execute_training_and_build(
         ),
     )
     _cast_trainable_parameters_to_fp32(preference.model, torch_module=torch)
+    gc.collect()
+    torch.cuda.empty_cache()
     preference.train(resume_from_checkpoint=str(preference_resume) if preference_resume else None)
     adapter = checkpoint_root / "final-adapter"
     preference.save_model(str(adapter))

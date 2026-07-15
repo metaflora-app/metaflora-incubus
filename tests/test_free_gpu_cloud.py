@@ -606,6 +606,10 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     source = RUNTIME_PATH.read_text(encoding="utf-8")
 
     assert "training_length = min(plan.config.profile.max_sequence_length, 1024)" in source
+    assert (
+        "preference_length = min(training_length, 512) if refinement else training_length"
+        in source
+    )
     assert "max_steps=32" in source
     assert "save_steps=8" in source
     assert "gradient_accumulation_steps=4" in source
@@ -616,6 +620,7 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert "learning_rate=2e-6 if refinement else 5e-6" in source
     assert "precompute_ref_log_probs=refinement" in source
     assert "precompute_ref_batch_size=4 if refinement else None" in source
+    assert "max_length=preference_length" in source
     assert "min(len(preference_train_dataset), 512)" in source
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
@@ -625,6 +630,12 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
         "        sft = None\n"
         "        gc.collect()\n"
         "        torch.cuda.empty_cache()"
+    ) in source
+    assert (
+        "_cast_trainable_parameters_to_fp32(preference.model, torch_module=torch)\n"
+        "    gc.collect()\n"
+        "    torch.cuda.empty_cache()\n"
+        "    preference.train("
     ) in source
 
 

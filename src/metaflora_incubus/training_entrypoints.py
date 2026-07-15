@@ -766,6 +766,10 @@ def _execute_training(run: TrainingRun) -> None:
             "install the maintainer training extra before a real run"
         ) from exc
 
+    from metaflora_incubus.preference_preprocessing import build_prefix_stable_dpo_trainer
+
+    DPOTrainer = build_prefix_stable_dpo_trainer(DPOTrainer)
+
     config = run.maintainer_config
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
