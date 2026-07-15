@@ -31,6 +31,7 @@ from metaflora_incubus.cloud_training import (
 )
 from metaflora_incubus.cloud_training_runtime import (
     _benchmark_final_gguf,
+    _cast_trainable_parameters_to_fp32,
     _checkout_pinned_revision,
     _hidden_huggingface_credentials,
     _latest_checkpoint,
@@ -502,16 +503,54 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
 def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     source = RUNTIME_PATH.read_text(encoding="utf-8")
 
-    assert "max_steps=64" in source
-    assert "save_steps=16" in source
-    assert "gradient_accumulation_steps=8" in source
-    assert "max_steps=24" in source
-    assert "save_steps=6" in source
+    assert "training_length = min(plan.config.profile.max_sequence_length, 1024)" in source
+    assert "max_steps=32" in source
+    assert "save_steps=8" in source
     assert "gradient_accumulation_steps=4" in source
+    assert "max_steps=12" in source
+    assert "save_steps=3" in source
+    assert "gradient_accumulation_steps=2" in source
     assert source.count("save_total_limit=2") == 2
     assert "learning_rate=5e-6" in source
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
+    assert source.count("_cast_trainable_parameters_to_fp32(") == 3
+
+
+def test_trainable_bfloat16_parameters_are_cast_before_amp_scaling() -> None:
+    class FakeData:
+        def __init__(self, dtype: str) -> None:
+            self.dtype = dtype
+
+        def to(self, dtype: str):
+            return FakeData(dtype)
+
+    class FakeParameter:
+        def __init__(self, *, dtype: str, requires_grad: bool) -> None:
+            self.data = FakeData(dtype)
+            self.requires_grad = requires_grad
+
+        @property
+        def dtype(self) -> str:
+            return self.data.dtype
+
+    class FakeModel:
+        def __init__(self, parameters) -> None:
+            self._parameters = parameters
+
+        def parameters(self):
+            return iter(self._parameters)
+
+    torch_module = types.SimpleNamespace(bfloat16="bf16", float32="fp32")
+    trainable = FakeParameter(dtype="bf16", requires_grad=True)
+    frozen = FakeParameter(dtype="bf16", requires_grad=False)
+
+    _cast_trainable_parameters_to_fp32(
+        FakeModel([trainable, frozen]), torch_module=torch_module
+    )
+
+    assert trainable.dtype == "fp32"
+    assert frozen.dtype == "bf16"
 
 
 def test_single_bootstrap_restores_cached_auth_and_seven_generic_values(tmp_path: Path) -> None:

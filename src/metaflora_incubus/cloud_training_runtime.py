@@ -76,6 +76,18 @@ def _select_lora_targets(module_names: tuple[str, ...]) -> tuple[str, ...]:
     return targets
 
 
+def _cast_trainable_parameters_to_fp32(model, *, torch_module) -> None:
+    trainable_count = 0
+    for parameter in model.parameters():
+        if not parameter.requires_grad:
+            continue
+        trainable_count += 1
+        if parameter.dtype == torch_module.bfloat16:
+            parameter.data = parameter.data.to(torch_module.float32)
+    if trainable_count == 0:
+        raise CloudConstraintError("training model has no trainable parameters")
+
+
 _CHECKPOINT_MANIFEST = "incubus-checkpoint-manifest.json"
 
 
@@ -624,6 +636,7 @@ def execute_training_and_build(
         target_modules=target_modules,
         task_type="CAUSAL_LM",
     )
+    training_length = min(plan.config.profile.max_sequence_length, 1024)
     callback = RemoteSyncCallback()
     sft_output = checkpoint_root / "sft"
     sft_resume = _latest_checkpoint(restored / "sft") if restored else None
@@ -646,12 +659,12 @@ def execute_training_and_build(
             callbacks=[callback],
             args=SFTConfig(
                 output_dir=str(sft_output),
-                max_length=plan.config.profile.max_sequence_length,
-                max_steps=64,
-                save_steps=16,
+                max_length=training_length,
+                max_steps=32,
+                save_steps=8,
                 save_total_limit=2,
                 per_device_train_batch_size=1,
-                gradient_accumulation_steps=8,
+                gradient_accumulation_steps=4,
                 learning_rate=2e-4,
                 fp16=True,
                 gradient_checkpointing=True,
@@ -660,6 +673,7 @@ def execute_training_and_build(
                 data_seed=1701,
             ),
         )
+        _cast_trainable_parameters_to_fp32(sft.model, torch_module=torch)
         sft.train(resume_from_checkpoint=str(sft_resume) if sft_resume else None)
         sft.save_model(str(sft_output / "final"))
         sync_checkpoints()
@@ -679,12 +693,12 @@ def execute_training_and_build(
         callbacks=[callback],
         args=DPOConfig(
             output_dir=str(preference_output),
-            max_length=plan.config.profile.max_sequence_length,
-            max_steps=24,
-            save_steps=6,
+            max_length=training_length,
+            max_steps=12,
+            save_steps=3,
             save_total_limit=2,
             per_device_train_batch_size=1,
-            gradient_accumulation_steps=4,
+            gradient_accumulation_steps=2,
             learning_rate=5e-6,
             fp16=True,
             gradient_checkpointing=True,
@@ -693,6 +707,7 @@ def execute_training_and_build(
             data_seed=1702,
         ),
     )
+    _cast_trainable_parameters_to_fp32(preference.model, torch_module=torch)
     preference.train(resume_from_checkpoint=str(preference_resume) if preference_resume else None)
     adapter = checkpoint_root / "final-adapter"
     preference.save_model(str(adapter))
