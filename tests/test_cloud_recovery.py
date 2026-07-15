@@ -184,7 +184,7 @@ def test_cuda_cmake_arguments_use_kaggle_compat_driver(tmp_path: Path) -> None:
     )
 
     assert "-DGGML_CUDA=ON" in arguments
-    assert f"-DCUDA_CUDA_LIBRARY={driver}" in arguments
+    assert f"-DCMAKE_LIBRARY_PATH={driver.parent}" in arguments
     assert _cuda_cmake_arguments(cuda_enabled=False) == ["-DGGML_CUDA=OFF"]
 
 

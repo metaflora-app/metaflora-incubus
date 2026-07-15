@@ -487,7 +487,7 @@ def _cuda_cmake_arguments(
         return arguments
     driver = cuda_driver_path or Path("/usr/local/cuda/compat/libcuda.so")
     if driver.is_file():
-        arguments.append(f"-DCUDA_CUDA_LIBRARY={driver}")
+        arguments.append(f"-DCMAKE_LIBRARY_PATH={driver.parent}")
     return arguments
 
 
