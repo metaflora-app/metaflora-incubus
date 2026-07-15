@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +51,9 @@ class RecoveryExportConfig:
     minimum_free_disk_bytes: int
     minimum_output_bytes: int
     maximum_output_bytes: int
+    reclaim_base_after_merge: bool
+    reclaim_intermediates: bool
+    base_model_identity: tuple[int, int] | None
 
     @classmethod
     def create(
@@ -65,10 +70,12 @@ class RecoveryExportConfig:
         minimum_free_disk_bytes: int = 24 * GIB,
         minimum_output_bytes: int = 5 * GIB // 2,
         maximum_output_bytes: int = 5 * GIB,
+        reclaim_base_after_merge: bool = False,
+        reclaim_intermediates: bool = False,
     ) -> RecoveryExportConfig:
         if _RUN_ID.fullmatch(run_id) is None:
             raise ExportRecoveryError("run identity is invalid")
-        base = _required_directory(Path(base_model), "base model")
+        base_candidate = Path(base_model)
         adapter_path = _required_directory(Path(adapter), "DPO adapter")
         merger = _required_file(Path(merge_script), "merge helper")
         converter = _required_file(Path(convert_script), "GGUF converter")
@@ -94,6 +101,31 @@ class RecoveryExportConfig:
                 raise ExportRecoveryError(f"{label} is invalid")
         if minimum_output_bytes > maximum_output_bytes:
             raise ExportRecoveryError("output size range is invalid")
+        for value, label in (
+            (reclaim_base_after_merge, "base-model reclamation"),
+            (reclaim_intermediates, "intermediate reclamation"),
+        ):
+            if not isinstance(value, bool):
+                raise ExportRecoveryError(f"{label} flag is invalid")
+        if reclaim_base_after_merge:
+            base = _reclaimable_directory(
+                base_candidate,
+                workspace=work,
+            )
+            _validate_reclaimable_base(
+                base,
+                protected=(adapter_path, work, merger, converter, quantizer),
+            )
+        else:
+            base = _required_directory(base_candidate, "base model")
+        _validate_recovery_layout(
+            workspace=work,
+            protected=(base, adapter_path, merger, converter, quantizer),
+        )
+        base_identity = None
+        if base.is_dir():
+            stat = base.stat()
+            base_identity = (stat.st_dev, stat.st_ino)
         return cls(
             run_id=run_id,
             base_model=base,
@@ -106,6 +138,9 @@ class RecoveryExportConfig:
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             minimum_output_bytes=minimum_output_bytes,
             maximum_output_bytes=maximum_output_bytes,
+            reclaim_base_after_merge=reclaim_base_after_merge,
+            reclaim_intermediates=reclaim_intermediates,
+            base_model_identity=base_identity,
         )
 
 
@@ -189,16 +224,32 @@ def execute_recovery_export(
     if config.workspace.is_symlink():
         raise ExportRecoveryError("recovery workspace is invalid")
     config.workspace.chmod(0o700)
-    inputs = {
-        "adapter_sha256": _sha256_directory(config.adapter),
-        "base_model_sha256": _sha256_directory(config.base_model),
-    }
     state_path = config.workspace / _STATE_NAME
-    state, resumed = _load_state(state_path, run_id=config.run_id, inputs=inputs)
-    stages = dict(state["stages"])
     merged = config.workspace / "merged-safetensors"
     f16 = config.workspace / "incubus-v1-f16.gguf"
     artifact = config.workspace / "metaflora-incubus-v1.gguf"
+    adapter_sha256 = _sha256_directory(config.adapter)
+    recovered_inputs = _recovered_inputs(
+        config,
+        state_path=state_path,
+        adapter_sha256=adapter_sha256,
+        merged=merged,
+        f16=f16,
+        artifact=artifact,
+    )
+    if recovered_inputs is not None:
+        inputs = recovered_inputs
+    else:
+        if config.base_model_identity is None:
+            raise ExportRecoveryError("base model directory is invalid")
+        inputs = {
+            "adapter_sha256": adapter_sha256,
+            "base_model_device": str(config.base_model_identity[0]),
+            "base_model_inode": str(config.base_model_identity[1]),
+            "base_model_sha256": _sha256_directory(config.base_model),
+        }
+    state, resumed = _load_state(state_path, run_id=config.run_id, inputs=inputs)
+    stages = dict(state["stages"])
 
     if _valid_file_stage(
         artifact,
@@ -208,6 +259,7 @@ def execute_recovery_export(
     ):
         stages = _record_file_stage(stages, "quantize", artifact)
         state = _write_state(state_path, config.run_id, inputs, stages)
+        _reclaim_verified_inputs(config, merged=merged, f16=f16, stage="quantize")
         return _write_result(config, artifact, state, resumed=True)
     _discard_invalid_file(artifact, config.workspace / f"{artifact.name}.partial")
     stages.pop("quantize", None)
@@ -222,9 +274,13 @@ def execute_recovery_export(
                 config,
                 probe(config.workspace),
                 stage="merge",
-                required_disk_bytes=max(
-                    config.minimum_free_disk_bytes,
-                    _directory_size(config.base_model) + config.maximum_output_bytes,
+                required_disk_bytes=(
+                    _directory_size(config.base_model) + GIB
+                    if config.reclaim_base_after_merge
+                    else max(
+                        config.minimum_free_disk_bytes,
+                        _directory_size(config.base_model) + config.maximum_output_bytes,
+                    )
                 ),
             )
             partial_merged = config.workspace / f"{merged.name}.partial"
@@ -242,17 +298,25 @@ def execute_recovery_export(
             )
             _require_merged_directory(partial_merged)
             partial_merged.replace(merged)
+            _fsync_tree(merged)
+            _fsync_directory(config.workspace)
             stages = _record_directory_stage(stages, "merge", merged)
             state = _write_state(state_path, config.run_id, inputs, stages)
         else:
             stages = _record_directory_stage(stages, "merge", merged)
             state = _write_state(state_path, config.run_id, inputs, stages)
 
+        _reclaim_verified_inputs(config, merged=merged, f16=f16, stage="merge")
+
         _require_resources(
             config,
             probe(config.workspace),
             stage="convert",
-            required_disk_bytes=_directory_size(merged) + config.maximum_output_bytes,
+            required_disk_bytes=(
+                _directory_size(merged) + GIB
+                if config.reclaim_intermediates
+                else _directory_size(merged) + config.maximum_output_bytes
+            ),
         )
         partial_f16 = config.workspace / f"{f16.name}.partial"
         run_command(
@@ -269,11 +333,15 @@ def execute_recovery_export(
         _require_gguf(partial_f16, minimum_size=4)
         partial_f16.replace(f16)
         f16.chmod(0o600)
+        _fsync_file(f16)
+        _fsync_directory(config.workspace)
         stages = _record_file_stage(stages, "convert", f16)
         state = _write_state(state_path, config.run_id, inputs, stages)
     else:
         stages = _record_file_stage(stages, "convert", f16)
         state = _write_state(state_path, config.run_id, inputs, stages)
+
+    _reclaim_verified_inputs(config, merged=merged, f16=f16, stage="convert")
 
     _require_resources(
         config,
@@ -291,8 +359,11 @@ def execute_recovery_export(
     )
     partial_artifact.replace(artifact)
     artifact.chmod(0o600)
+    _fsync_file(artifact)
+    _fsync_directory(config.workspace)
     stages = _record_file_stage(stages, "quantize", artifact)
     state = _write_state(state_path, config.run_id, inputs, stages)
+    _reclaim_verified_inputs(config, merged=merged, f16=f16, stage="quantize")
     return _write_result(config, artifact, state, resumed=resumed)
 
 
@@ -583,6 +654,68 @@ def _load_state(
     return state, True
 
 
+def _recovered_inputs(
+    config: RecoveryExportConfig,
+    *,
+    state_path: Path,
+    adapter_sha256: str,
+    merged: Path,
+    f16: Path,
+    artifact: Path,
+) -> dict[str, str] | None:
+    if not config.reclaim_base_after_merge or not state_path.is_file():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(state, dict)
+        or state.get("schema_version") != 1
+        or state.get("run_id") != config.run_id
+        or not isinstance(state.get("inputs"), dict)
+        or not isinstance(state.get("stages"), dict)
+    ):
+        return None
+    inputs = state["inputs"]
+    stages = state["stages"]
+    if inputs.get("adapter_sha256") != adapter_sha256:
+        return None
+    verified_successor = (
+        _valid_file_stage(
+            artifact,
+            stages.get("quantize"),
+            minimum_size=config.minimum_output_bytes,
+            maximum_size=config.maximum_output_bytes,
+        )
+        or _valid_file_stage(f16, stages.get("convert"), minimum_size=4)
+        or _valid_directory_stage(merged, stages.get("merge"))
+    )
+    base_sha256 = inputs.get("base_model_sha256")
+    base_device = inputs.get("base_model_device")
+    base_inode = inputs.get("base_model_inode")
+    if (
+        not verified_successor
+        or not isinstance(base_sha256, str)
+        or not isinstance(base_device, str)
+        or not isinstance(base_inode, str)
+    ):
+        return None
+    try:
+        stored_identity = (int(base_device), int(base_inode))
+    except ValueError:
+        return None
+    if config.base_model_identity is not None and config.base_model_identity != stored_identity:
+        if _sha256_directory(config.base_model) != base_sha256:
+            raise ExportRecoveryError("restored base model input binding changed")
+    return {
+        "adapter_sha256": adapter_sha256,
+        "base_model_device": base_device,
+        "base_model_inode": base_inode,
+        "base_model_sha256": base_sha256,
+    }
+
+
 def _write_state(
     path: Path, run_id: str, inputs: Mapping[str, str], stages: Mapping[str, object]
 ) -> dict[str, object]:
@@ -724,6 +857,108 @@ def _required_file(path: Path, label: str) -> Path:
     return resolved
 
 
+def _disposable_marker(base: Path) -> Path:
+    return base.parent / f".{base.name}.incubus-disposable"
+
+
+def _reclaimable_directory(path: Path, *, workspace: Path) -> Path:
+    if path.is_symlink():
+        raise ExportRecoveryError("base model directory is invalid")
+    resolved = path.resolve()
+    marker = _disposable_marker(resolved)
+    if marker.is_symlink() or not marker.is_file():
+        raise ExportRecoveryError("base model cleanup marker is missing")
+    try:
+        marked_path = Path(marker.read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, UnicodeDecodeError):
+        raise ExportRecoveryError("base model cleanup marker is invalid") from None
+    if marked_path != resolved:
+        raise ExportRecoveryError("base model cleanup marker is invalid")
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise ExportRecoveryError("base model directory is invalid")
+        return resolved
+    if not (workspace / _STATE_NAME).is_file():
+        raise ExportRecoveryError("base model directory is invalid")
+    return resolved
+
+
+def _validate_recovery_layout(*, workspace: Path, protected: tuple[Path, ...]) -> None:
+    forbidden = {Path("/").resolve(), Path.home().resolve()}
+    if workspace in forbidden:
+        raise ExportRecoveryError("recovery workspace is unsafe")
+    for path in protected:
+        resolved = path.resolve()
+        if resolved == workspace or workspace in resolved.parents or resolved in workspace.parents:
+            raise ExportRecoveryError("recovery workspace overlaps protected recovery data")
+
+
+def _validate_reclaimable_base(base: Path, *, protected: tuple[Path, ...]) -> None:
+    forbidden = {Path("/").resolve(), Path.home().resolve()}
+    if base in forbidden:
+        raise ExportRecoveryError("base model cleanup target is unsafe")
+    for path in protected:
+        resolved = path.resolve()
+        if resolved == base or base in resolved.parents or resolved in base.parents:
+            raise ExportRecoveryError("base model cleanup target contains protected recovery data")
+
+
+def _remove_verified_directory(path: Path, *, expected_identity: tuple[int, int] | None) -> None:
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_dir():
+        raise ExportRecoveryError("verified cleanup target is invalid")
+    if expected_identity is None:
+        raise ExportRecoveryError("verified cleanup target appeared after validation")
+    quarantine = path.parent / f".{path.name}.reclaim-{uuid.uuid4().hex}"
+    path.rename(quarantine)
+    stat = quarantine.stat()
+    if (stat.st_dev, stat.st_ino) != expected_identity:
+        if not path.exists():
+            quarantine.rename(path)
+        raise ExportRecoveryError("verified cleanup target identity changed")
+    shutil.rmtree(quarantine)
+
+
+def _reclaim_verified_inputs(
+    config: RecoveryExportConfig,
+    *,
+    merged: Path,
+    f16: Path,
+    stage: str,
+) -> None:
+    if config.reclaim_base_after_merge and stage in {"merge", "convert", "quantize"}:
+        if config.base_model.exists():
+            stat = config.base_model.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            if config.base_model_identity is not None and identity != config.base_model_identity:
+                raise ExportRecoveryError("base model cleanup target identity changed")
+        _validate_reclaimable_base(
+            config.base_model,
+            protected=(
+                config.adapter,
+                config.workspace,
+                config.merge_script,
+                config.convert_script,
+                config.quantize_binary,
+            ),
+        )
+        _remove_verified_directory(
+            config.base_model,
+            expected_identity=config.base_model_identity,
+        )
+    if config.reclaim_intermediates and stage in {"convert", "quantize"}:
+        merged_identity = None
+        if merged.exists():
+            stat = merged.stat()
+            merged_identity = (stat.st_dev, stat.st_ino)
+        _remove_verified_directory(merged, expected_identity=merged_identity)
+    if config.reclaim_intermediates and stage == "quantize":
+        if f16.exists() and (f16.is_symlink() or not f16.is_file()):
+            raise ExportRecoveryError("verified cleanup target is invalid")
+        f16.unlink(missing_ok=True)
+
+
 def _sha256_directory(path: Path) -> str:
     digest = hashlib.sha256()
     files = sorted(item for item in path.rglob("*") if item.is_file())
@@ -752,7 +987,6 @@ def _sha256_file(path: Path) -> str:
 
 
 def _atomic_json(path: Path, value: Mapping[str, object], *, pretty: bool = False) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
     payload = (
         json.dumps(
             value,
@@ -763,30 +997,59 @@ def _atomic_json(path: Path, value: Mapping[str, object], *, pretty: bool = Fals
         )
         + "\n"
     )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
-    path.chmod(0o600)
+    _atomic_payload(path, payload)
 
 
 def _atomic_text(path: Path, payload: str) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary, flags, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
-    path.chmod(0o600)
+    _atomic_payload(path, payload)
+
+
+def _atomic_payload(path: Path, payload: str) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        path.chmod(0o600)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(path: Path) -> None:
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise ExportRecoveryError("merged model directory contains a symlink")
+        if item.is_file():
+            _fsync_file(item)
+    directories = sorted(
+        (item for item in path.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        _fsync_directory(directory)
+    _fsync_directory(path)
 
 
 def _run_command(command: tuple[str, ...]) -> None:

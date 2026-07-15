@@ -27,6 +27,8 @@ def main() -> int:
     parser.add_argument("--quantize-binary", type=Path, required=True)
     parser.add_argument("--minimum-free-disk-gib", type=int, default=24)
     parser.add_argument("--minimum-ram-gib", type=int, default=20)
+    parser.add_argument("--reclaim-base-after-merge", action="store_true")
+    parser.add_argument("--reclaim-intermediates", action="store_true")
     parser.add_argument("--upload-repo")
     parser.add_argument("--upload-branch")
     arguments = parser.parse_args()
@@ -43,6 +45,8 @@ def main() -> int:
             quantize_binary=arguments.quantize_binary,
             minimum_free_disk_bytes=arguments.minimum_free_disk_gib * GIB,
             minimum_ram_bytes=arguments.minimum_ram_gib * GIB,
+            reclaim_base_after_merge=arguments.reclaim_base_after_merge,
+            reclaim_intermediates=arguments.reclaim_intermediates,
         )
         result = execute_recovery_export(config)
         uploaded = (
