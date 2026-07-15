@@ -21,7 +21,8 @@ def test_recovery_notebook_is_single_cell_and_skips_training() -> None:
     assert 'UserSecretsClient().get_secret("INCUBUS_BOOTSTRAP")' in source
     assert 'Path("/kaggle/working")' in source
     assert '"--workspace-root"' in source
-    assert '"/kaggle/working/incubus-work"' in source
+    assert '"/tmp/incubus-work"' in source
+    assert 'shutil.disk_usage("/tmp").free' in source
     assert '"--query-gpu=name,memory.total"' in source
     assert "Kaggle recovery requires the GPU T4 x2 accelerator" in source
     assert 'runtime_environment["CUDA_VISIBLE_DEVICES"] = "0,1"' in source
