@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from metaflora_incubus.cloud_training import (
-    THREE_GIB,
     CheckpointBackend,
     CloudConstraintError,
     CloudExecutionPlan,
@@ -29,6 +28,7 @@ from metaflora_incubus.cloud_training import (
     safe_ephemeral_cleanup,
     validate_cloud_disk_preflight,
 )
+from metaflora_incubus.huggingface_publication import MIN_MODEL_BYTES
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -408,7 +408,21 @@ def _build_gguf(
     )
     _checkout_pinned_revision(llama_cpp, plan.config.llama_cpp_revision)
     _run(["cmake", "-B", "build", "-DLLAMA_CURL=OFF"], cwd=llama_cpp)
-    _run(["cmake", "--build", "build", "--config", "Release", "-j2"], cwd=llama_cpp)
+    _run(
+        [
+            "cmake",
+            "--build",
+            "build",
+            "--config",
+            "Release",
+            "--target",
+            "llama-server",
+            "llama-export-lora",
+            "llama-quantize",
+            "-j2",
+        ],
+        cwd=llama_cpp,
+    )
     artifacts.mkdir(parents=True, exist_ok=True)
     base = artifacts / "base-f16.gguf"
     lora = artifacts / "adapter.gguf"
@@ -457,10 +471,12 @@ def _build_gguf(
     )
     if (
         not final.is_file()
-        or not THREE_GIB <= final.stat().st_size <= plan.config.profile.final_gguf_max_bytes
+        or not MIN_MODEL_BYTES
+        <= final.stat().st_size
+        <= plan.config.profile.final_gguf_max_bytes
     ):
         raise CloudConstraintError(
-            f"{plan.final_gguf_quantization} GGUF must remain inside the 3-5 GiB cloud range"
+            f"{plan.final_gguf_quantization} GGUF must remain inside the 2.5-5 GiB cloud range"
         )
     base.unlink(missing_ok=True)
     lora.unlink(missing_ok=True)
