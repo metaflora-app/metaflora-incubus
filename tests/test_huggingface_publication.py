@@ -254,13 +254,13 @@ def blocker_codes(decision: object) -> set[str]:
     return {blocker.code for blocker in decision.blockers}  # type: ignore[attr-defined]
 
 
-def test_default_policy_is_three_to_five_gib_and_uses_the_public_repository() -> None:
+def test_default_policy_is_two_point_five_to_five_gib_and_uses_the_public_repository() -> None:
     publications = publication_module()
 
     release_policy = publications.PublicationPolicy.default()
 
     assert release_policy.repo_id == DEFAULT_REPO_ID
-    assert release_policy.min_model_bytes == 3 * 1024**3
+    assert release_policy.min_model_bytes == 5 * 1024**3 // 2
     assert release_policy.max_model_bytes == 5 * 1024**3
     assert release_policy.min_model_bytes < release_policy.max_model_bytes
 
@@ -273,7 +273,7 @@ def test_real_size_bounds_can_be_exercised_with_a_sparse_gguf(tmp_path: Path) ->
     with sparse_model.open("r+b") as handle:
         handle.truncate(release_policy.min_model_bytes)
 
-    assert sparse_model.stat().st_size == 3 * 1024**3
+    assert sparse_model.stat().st_size == 5 * 1024**3 // 2
 
 
 def test_complete_verified_bundle_is_approved(tmp_path: Path) -> None:
