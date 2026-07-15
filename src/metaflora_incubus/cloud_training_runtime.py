@@ -6,6 +6,7 @@ CUDA, bitsandbytes, or the Hub client.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import hmac
 import json
@@ -678,6 +679,9 @@ def execute_training_and_build(
         sft.save_model(str(sft_output / "final"))
         sync_checkpoints()
         model = sft.model
+        sft = None
+        gc.collect()
+        torch.cuda.empty_cache()
     preference = DPOTrainer(
         model=model,
         processing_class=tokenizer,

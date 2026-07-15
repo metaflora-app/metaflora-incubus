@@ -478,6 +478,7 @@ def test_one_click_notebook_uses_cloud_secrets_and_no_local_mac_paths() -> None:
     )
     assert 'Path(root).glob("nvidia/*/lib")' in source
     assert 'runtime_environment["LD_LIBRARY_PATH"]' in source
+    assert 'os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"' in source
     assert "bitsandbytes.functional.quantize_4bit" in source
     assert source.count("env=runtime_environment") == 2
     assert "from peft import LoraConfig" in source
@@ -515,6 +516,7 @@ def test_free_gpu_training_schedule_finishes_and_checkpoints_on_a_t4() -> None:
     assert "save_safetensors=True" not in source
     assert source.count("dtype=torch.float16") == 2
     assert source.count("_cast_trainable_parameters_to_fp32(") == 3
+    assert "model = sft.model\n        sft = None\n        gc.collect()\n        torch.cuda.empty_cache()" in source
 
 
 def test_trainable_bfloat16_parameters_are_cast_before_amp_scaling() -> None:
