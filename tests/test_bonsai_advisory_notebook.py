@@ -37,9 +37,10 @@ def test_bonsai_advisory_notebook_is_clean_and_every_code_cell_compiles() -> Non
 def test_bonsai_notebook_uses_private_bootstrap_without_kaggle_secrets() -> None:
     raw = notebook_source()
 
-    assert "/kaggle/input/incubus-private-runtime-bootstrap/bootstrap-key.txt" in raw
     assert "UserSecretsClient" not in raw
     assert "userdata.get" not in raw
+    assert "glob('**/bootstrap-key.txt')" in raw
+    assert "expected one bootstrap dataset file" in raw
     assert 'code_revision = "7ec9bcd46001b0ecd8d15e83203835f06dca59ea"' in raw
     assert "decrypt_cloud_bootstrap" in raw
     assert "install_cloud_bootstrap" in raw
