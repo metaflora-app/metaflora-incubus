@@ -72,7 +72,7 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert "UserSecretsClient" not in raw
     assert 'glob("**/bootstrap-key.txt")' in raw
     assert "expected one bootstrap dataset file" in raw
-    assert 'code_revision = "7ec9bcd46001b0ecd8d15e83203835f06dca59ea"' in raw
+    assert 'code_revision = "cdea55e0dbd1c80e5832d2684834f74c3d878186"' in raw
 
 
 def test_notebook_builds_a_pinned_local_cuda_server_with_actionable_logs() -> None:
