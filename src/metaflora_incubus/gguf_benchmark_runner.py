@@ -403,7 +403,9 @@ def _wait_for_health(
     deadline = monotonic() + timeout
     while monotonic() <= deadline:
         if process.poll() is not None:
-            raise GgufBenchmarkError("llama-server exited before health check")
+            raise GgufBenchmarkError(
+                "llama-server exited before health check" + _server_stderr_diagnostic(process)
+            )
         try:
             status, response = client("GET", f"{base_url}/health", None, 1.0)
             if status == 200 and response.get("status") in {"ok", "ready"}:
@@ -548,13 +550,30 @@ def _minimal_environment() -> dict[str, str]:
     return {key: os.environ[key] for key in allowed if key in os.environ}
 
 
+def _server_stderr_diagnostic(process: ServerProcess) -> str:
+    """Expose a bounded startup diagnostic without retaining normal benchmark output."""
+    stream = getattr(process, "stderr", None)
+    if stream is None:
+        return ""
+    try:
+        payload = stream.read()
+    except (AttributeError, OSError, ValueError):
+        return ""
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8", errors="replace")
+    if not isinstance(payload, str):
+        return ""
+    compact = " ".join(payload.strip().split())[-2000:]
+    return f": {compact}" if compact else ""
+
+
 def _default_process_factory(command: list[str], environment: dict[str, str]) -> ServerProcess:
     return subprocess.Popen(
         command,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
