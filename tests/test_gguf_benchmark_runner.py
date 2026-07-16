@@ -41,6 +41,23 @@ class FakeProcess:
         self.terminated = True
 
 
+class ExitedProcess:
+    def __init__(self) -> None:
+        self.stderr = "failed to load model architecture"
+
+    def poll(self) -> int:
+        return 1
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 1
+
+    def kill(self) -> None:
+        return None
+
+
 def config(tmp_path: Path) -> BenchmarkRunnerConfig:
     binary = tmp_path / "llama-server"
     binary.write_bytes(b"pinned-server")
@@ -223,6 +240,17 @@ def test_runner_fails_before_process_on_artifact_mismatch(tmp_path: Path) -> Non
         run_gguf_benchmark(active_config, process_factory=process_factory)
     assert called is False
     assert not active_config.output_dir.exists()
+
+
+def test_runner_reports_server_stderr_when_the_process_exits_before_health_check(tmp_path: Path) -> None:
+    active_config = config(tmp_path)
+
+    with pytest.raises(GgufBenchmarkError, match="failed to load model architecture"):
+        run_gguf_benchmark(
+            active_config,
+            process_factory=lambda command, environment: ExitedProcess(),
+            sleeper=lambda _: None,
+        )
 
 
 def test_runner_fails_closed_on_malformed_chat_response(tmp_path: Path) -> None:
