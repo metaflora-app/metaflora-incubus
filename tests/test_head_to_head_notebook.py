@@ -51,10 +51,9 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert "INCUBUS_CODE_REVISION" in raw
     assert "metaflora/incubus-checkpoints" in raw
     assert "incubus-training-v1" in raw
-    assert "HfApi" in raw
     assert "checkpoint_head" in raw
-    assert "model_info" in raw
     assert 're.fullmatch(r"[0-9a-f]{40}", checkpoint_head)' in raw
+    assert 'checkpoint_head = "53c0c45043cb9d480834c07a70c428c64f00f1be"' in raw
     assert "runs/incubus-v1-refine-001/exports/candidate-upload-receipt.json" in raw
     assert "revision=checkpoint_head" in raw
     assert 'candidate_upload_receipt["artifact_revision"]' in raw
