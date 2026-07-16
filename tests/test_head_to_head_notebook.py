@@ -54,8 +54,10 @@ def test_notebook_restores_every_private_input_without_previous_session_paths() 
     assert "checkpoint_head" in raw
     assert 're.fullmatch(r"[0-9a-f]{40}", checkpoint_head)' in raw
     assert 'checkpoint_head = "53c0c45043cb9d480834c07a70c428c64f00f1be"' in raw
-    assert "runs/incubus-v1-refine-001/exports/candidate-upload-receipt.json" in raw
-    assert "revision=checkpoint_head" in raw
+    assert "HfApi" not in raw
+    assert "model_info" not in raw
+    assert "candidate_upload_receipt = {" in raw
+    assert "6ba4ad51e59b4776693b709de6b86f824903de7d22ed5906c3c678a2cecb54e0" in raw
     assert 'candidate_upload_receipt["artifact_revision"]' in raw
     assert 'candidate_upload_receipt["artifact_path"]' in raw
     assert 'candidate_upload_receipt["remote_prefix"]' in raw
